@@ -74,6 +74,33 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
+  it('never sends reminders while the observer is in shadow mode', async () => {
+    const now = new Date(2026, 9, 9, 20).getTime();
+    const harness = await createHarness([{ action: 'create', confidence: 0.99 }], now);
+    harness.store.createFollowUp({
+      id: 'fu_shadow',
+      chatId: 'oc_intern',
+      sourceMessageId: 'm_shadow',
+      summary: '历史遗留事项',
+      ownerId: 'ou_user',
+      dueAt: now - 1,
+      status: 'pending',
+      createdAt: now - 10_000,
+      updatedAt: now - 10_000,
+    });
+    const shadow = new ProactiveController({
+      config: { ...ACTIVE_CONFIG, mode: 'shadow' },
+      channel: harness.channel as never,
+      store: harness.store,
+      decisionProvider: harness.provider,
+      now: () => now,
+    });
+    await shadow.runDueReminders();
+    expect(harness.channel.sent).toHaveLength(0);
+    await shadow.stop();
+    await harness.controller.stop();
+  });
+
   it('persists reminder idempotency across restart and never sends outside the allowlist', async () => {
     const now = new Date(2026, 9, 9, 20).getTime();
     const first = await createHarness([{ action: 'create', confidence: 0.99 }], now);
@@ -190,4 +217,3 @@ function message(
     createTime,
   };
 }
-

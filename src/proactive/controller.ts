@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
@@ -112,6 +112,7 @@ export class ProactiveController {
   }
 
   async runDueReminders(): Promise<void> {
+    if (this.deps.config.mode !== 'active') return;
     for (const item of this.deps.store.dueFollowUps(this.now())) {
       if (!this.allowedChats.has(item.chatId)) {
         log.warn('proactive', 'reminder-denied-chat', { followUpId: item.id, chatId: item.chatId });
@@ -146,11 +147,14 @@ export class ProactiveController {
     try {
       result = await this.deps.decisionProvider.decide({
         message,
-        recentMessages: this.deps.store.recentMessages(
-          msg.chatId,
-          now - this.deps.config.contextWindowHours * 60 * 60 * 1_000,
-          this.deps.config.contextMessages,
-        ),
+        recentMessages: this.deps.store
+          .recentMessages(
+            msg.chatId,
+            now - this.deps.config.contextWindowHours * 60 * 60 * 1_000,
+            this.deps.config.contextMessages + 1,
+          )
+          .filter((item) => item.messageId !== message.messageId)
+          .slice(-this.deps.config.contextMessages),
         pendingFollowUps: this.deps.store.pendingFollowUps(msg.chatId),
         now,
       });
@@ -288,18 +292,4 @@ function overlap(a: Set<string>, b: Set<string>): number {
   let count = 0;
   for (const token of a) if (b.has(token)) count++;
   return count;
-}
-
-export function makeFollowUpForTest(input: Partial<FollowUp> & Pick<FollowUp, 'chatId' | 'summary'>): FollowUp {
-  const now = Date.now();
-  return {
-    id: input.id ?? `fu_${randomUUID()}`,
-    sourceMessageId: input.sourceMessageId ?? randomUUID(),
-    ownerId: input.ownerId ?? 'ou_test',
-    dueAt: input.dueAt ?? now,
-    status: input.status ?? 'pending',
-    createdAt: input.createdAt ?? now,
-    updatedAt: input.updatedAt ?? now,
-    ...input,
-  };
 }
