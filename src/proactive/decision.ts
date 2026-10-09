@@ -1,4 +1,4 @@
-import { choice, TypeSafeClient } from '@typesafe-ai/sdk';
+import { choice, TypeSafeClient, type TypeSafeClientConfig } from '@typesafe-ai/sdk';
 import type { DecisionInput, DecisionProvider, DecisionResult, ProactiveAction } from './types';
 
 const ACTIONS = {
@@ -13,9 +13,13 @@ const ACTIONS = {
 export class JevDecisionProvider implements DecisionProvider {
   private readonly client: TypeSafeClient;
 
-  constructor(apiKey = process.env.TYPESAFE_API_KEY) {
+  constructor(
+    apiKey = process.env.TYPESAFE_API_KEY,
+    fetchImpl?: TypeSafeClientConfig['fetch'],
+  ) {
     this.client = new TypeSafeClient({
       ...(apiKey ? { apiKey } : {}),
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
       defaultModel: process.env.TYPESAFE_DEFAULT_MODEL ?? 'jev-latest',
       timeout: 8_000,
       retry: { maxRetries: 1 },
