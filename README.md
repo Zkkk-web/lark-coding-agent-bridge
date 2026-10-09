@@ -299,6 +299,29 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). After a manual edit, **restart the bridge** or send `/reconnect` from an allowed admin context to apply it. For day-to-day tweaks `/invite` / `/config` are easier; direct edits are mainly for deployment scripts that pre-seed access.
 
+### Experimental: proactive follow-up observer
+
+The observer reads non-mention text in explicitly allowlisted internal chats, uses Jev for structured intent classification, and records follow-ups only when the message contains an explicit due date. A due follow-up is reminded once in its source chat; completion, cancellation, and postponement survive restarts. Non-mention messages never enter Claude, Codex, or Hermes, and the observer does not mutate calendars, tasks, or Base records.
+
+Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` event, add the bot to the target chat, and set `TYPESAFE_API_KEY` in the service environment. Then add this field to the matching profile. `allowedChats` is an independent hard boundary and is required:
+
+```json
+{
+  "proactiveObserver": {
+    "enabled": true,
+    "mode": "shadow",
+    "allowedChats": ["oc_xxxxxxxxxxxxx"],
+    "actionThreshold": 0.85,
+    "shadowThreshold": 0.6,
+    "contextMessages": 20,
+    "contextWindowHours": 24,
+    "pollIntervalMs": 60000
+  }
+}
+```
+
+Start in `shadow` mode and label real chat traffic before switching to `active`. State is stored as `proactive-observer.json` in the profile directory with mode `0600`. The target chat must also remain in the existing `access.allowedChats`; the existing mentioned-message path is unchanged.
+
 ## Cloud-doc comments
 
 Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.

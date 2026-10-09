@@ -31,6 +31,20 @@ export interface ProfileAccess {
   chatRequireMention?: Record<string, boolean>;
 }
 
+export interface ProactiveObserverConfig {
+  enabled: boolean;
+  mode: 'shadow' | 'active';
+  /** Hard outbound and intake boundary. No proactive path may operate outside these chats. */
+  allowedChats: string[];
+  /** Decisions at or above this confidence may mutate follow-up state in active mode. */
+  actionThreshold: number;
+  /** Decisions below this confidence are ignored instead of retained as shadow candidates. */
+  shadowThreshold: number;
+  contextMessages: number;
+  contextWindowHours: number;
+  pollIntervalMs: number;
+}
+
 export interface SandboxConfig {
   default?: SandboxMode;
   max?: SandboxMode;
@@ -164,6 +178,8 @@ export interface ProfileConfig {
   comments: CommentConfig;
   /** In-meeting agent settings. See {@link MeetingConfig}. */
   meeting: MeetingConfig;
+  /** Safe, allowlisted non-mention observer. Disabled by default. */
+  proactiveObserver: ProactiveObserverConfig;
   larkCli: LarkCliConfig;
 }
 
@@ -242,6 +258,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     meeting?: unknown;
+    proactiveObserver?: unknown;
     larkCli?: unknown;
   };
 
@@ -269,6 +286,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   const workspaces = normalizeWorkspaces(raw.workspaces);
   const comments = normalizeComments(raw.comments);
   const meeting = normalizeMeeting(raw.meeting);
+  const proactiveObserver = normalizeProactiveObserver(raw.proactiveObserver);
   const larkCli = normalizeLarkCli(raw.larkCli);
 
   return {
@@ -294,8 +312,42 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     },
     comments,
     meeting,
+    proactiveObserver,
     larkCli,
   };
+}
+
+function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
+  const raw = input && typeof input === 'object'
+    ? (input as Partial<ProactiveObserverConfig>)
+    : {};
+  const actionThreshold = probabilityOr(raw.actionThreshold, 0.85);
+  const shadowThreshold = Math.min(
+    probabilityOr(raw.shadowThreshold, 0.6),
+    actionThreshold,
+  );
+  return {
+    enabled: raw.enabled === true,
+    mode: raw.mode === 'active' ? 'active' : 'shadow',
+    allowedChats: stringArray(raw.allowedChats),
+    actionThreshold,
+    shadowThreshold,
+    contextMessages: boundedInteger(raw.contextMessages, 20, 1, 100),
+    contextWindowHours: boundedInteger(raw.contextWindowHours, 24, 1, 168),
+    pollIntervalMs: boundedInteger(raw.pollIntervalMs, 60_000, 1_000, 60 * 60 * 1_000),
+  };
+}
+
+function probabilityOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : fallback;
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(min, Math.min(max, Math.floor(value)))
+    : fallback;
 }
 
 function normalizeAccounts(input: unknown): ProfileConfig['accounts'] {

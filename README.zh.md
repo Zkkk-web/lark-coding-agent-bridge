@@ -299,6 +299,29 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 每行都带 `chatId`（群 / 私聊 ID）和 `senderId`（用户 `open_id`）。手改完后**重启 bridge**，或在允许的 admin 上下文里发 `/reconnect` 让它生效。日常调整还是 `/invite` / `/config` 更省事，直接改文件主要用于部署脚本预填。
 
+### 实验性：主动跟进观察器
+
+观察器让 bot 在指定内部群里读取非 `@` 文本，用 Jev 做结构化意图判断，并在消息包含明确期限时记录跟进事项。到期后只向原群发送一次提醒；完成、取消或延期会持久化，重启不会重复提醒。它不会把非 `@` 消息交给 Claude、Codex 或 Hermes，也不会操作日历、任务或多维表格。
+
+先在飞书开放平台为应用开通 `im:message.group_msg`，订阅 `im.message.receive_v1`，把 bot 加入目标群，并在服务环境中设置 `TYPESAFE_API_KEY`。然后在对应 profile 添加下面的字段；`allowedChats` 是独立的硬白名单，不能省略：
+
+```json
+{
+  "proactiveObserver": {
+    "enabled": true,
+    "mode": "shadow",
+    "allowedChats": ["oc_xxxxxxxxxxxxx"],
+    "actionThreshold": 0.85,
+    "shadowThreshold": 0.6,
+    "contextMessages": 20,
+    "contextWindowHours": 24,
+    "pollIntervalMs": 60000
+  }
+}
+```
+
+建议先用 `shadow` 只记录判断，标注真实群消息并核对精确率后再切到 `active`。状态保存在 profile 目录的 `proactive-observer.json`，文件权限为 `0600`。原有 `access.allowedChats` 仍然必须包含目标群，群内 `@ bot` 的既有路径不受观察器影响。
+
 ## 云文档评论
 
 云文档评论不再需要单独绑定工作目录或维护文档白名单。支持的文档评论里 @bot 后，bridge 会在同一个评论线程里回复。评论运行复用文档级 session key；没有记录过文档 cwd 时回退到用户 home 目录。
