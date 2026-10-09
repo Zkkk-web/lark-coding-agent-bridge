@@ -71,6 +71,7 @@ import type { AppPaths } from '../config/app-paths';
 import { ProactiveController } from '../proactive/controller';
 import { JevDecisionProvider } from '../proactive/decision';
 import { ProactiveStore } from '../proactive/store';
+import type { DecisionProvider } from '../proactive/types';
 import {
   consumeCotEvents,
   CotClient,
@@ -185,6 +186,8 @@ export interface StartChannelDeps {
     AppPaths,
     'secretsFile' | 'keystoreSaltFile' | 'mediaDir' | 'proactiveObserverFile'
   >;
+  /** Test/deployment injection point; production defaults to the Jev SDK provider. */
+  proactiveDecisionProvider?: DecisionProvider;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -287,7 +290,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           config: controls.profileConfig.proactiveObserver,
           channel,
           store: new ProactiveStore(deps.appPaths.proactiveObserverFile),
-          decisionProvider: new JevDecisionProvider(),
+          decisionProvider: deps.proactiveDecisionProvider ?? new JevDecisionProvider(),
         });
         await proactiveObserver.load();
       } catch (err) {
