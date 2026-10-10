@@ -15,6 +15,9 @@ import type {
   ProactiveDecision,
 } from './types';
 
+const RECONCILIATION_INTERVAL_MS = 30_000;
+const MAX_RECENT_THREADS = 10;
+
 export interface ProactiveControllerDeps {
   config: ProactiveObserverConfig;
   channel: Pick<LarkChannel, 'send'>;
@@ -36,6 +39,7 @@ export class ProactiveController {
   private readonly now: () => number;
   private readonly globallyDisabled: () => boolean;
   private recoverySince: number | undefined;
+  private lastReconciliationAt = 0;
 
   constructor(private readonly deps: ProactiveControllerDeps) {
     this.allowedChats = new Set(deps.config.allowedChats);
@@ -92,8 +96,10 @@ export class ProactiveController {
 
   async runReconciliation(): Promise<number> {
     if (!this.isEnabled() || !this.deps.historySource) return 0;
-    const since = this.recoverySince ?? this.now();
     const cycleStartedAt = this.now();
+    if (cycleStartedAt - this.lastReconciliationAt < RECONCILIATION_INTERVAL_MS) return 0;
+    this.lastReconciliationAt = cycleStartedAt;
+    const since = this.recoverySince ?? this.now();
     let recovered = 0;
 
     const accept = (messages: ObserverMessage[]): void => {
@@ -117,17 +123,34 @@ export class ProactiveController {
     }
 
     await this.queue;
-    const pendingThreads = new Map<string, string>();
-    for (const followUp of this.deps.store.snapshot().followUps) {
+    const snapshot = this.deps.store.snapshot();
+    const watchedThreads = new Map<string, string>();
+    for (const followUp of snapshot.followUps) {
       if (
         followUp.status === 'pending' &&
         followUp.threadId &&
         this.allowedChats.has(followUp.chatId)
       ) {
-        pendingThreads.set(`${followUp.chatId}:${followUp.threadId}`, followUp.chatId);
+        watchedThreads.set(`${followUp.chatId}:${followUp.threadId}`, followUp.chatId);
       }
     }
-    for (const [key, chatId] of pendingThreads) {
+    // A missed push can also be the first new commitment in a thread whose
+    // previous follow-up is already closed. Keep a bounded set of recently
+    // observed threads under reconciliation so that lifecycle recovery does
+    // not end the moment the old item becomes completed/cancelled.
+    const recentSince = cycleStartedAt - this.deps.config.contextWindowHours * 60 * 60 * 1_000;
+    for (const message of [...snapshot.messages].reverse()) {
+      if (
+        watchedThreads.size >= MAX_RECENT_THREADS ||
+        !message.threadId ||
+        message.createTime < recentSince ||
+        !this.allowedChats.has(message.chatId)
+      ) {
+        continue;
+      }
+      watchedThreads.set(`${message.chatId}:${message.threadId}`, message.chatId);
+    }
+    for (const [key, chatId] of watchedThreads) {
       const threadId = key.slice(chatId.length + 1);
       try {
         accept(await this.deps.historySource.listThread(chatId, threadId, since));

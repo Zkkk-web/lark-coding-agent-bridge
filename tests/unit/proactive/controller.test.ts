@@ -481,6 +481,42 @@ describe('proactive follow-up controller', () => {
     expect(gaps).toEqual([1]);
     await controller.stop();
   });
+
+  it('keeps recently observed threads recoverable after their follow-up is closed', async () => {
+    const now = Date.parse('2026-10-10T08:00:00.000Z');
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-recent-thread-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    store.recordMessage({
+      messageId: 'm_previous',
+      chatId: 'oc_intern',
+      threadId: 'omt_recent',
+      senderId: 'ou_user',
+      text: '之前的事项已经结束',
+      createTime: now - 60_000,
+    });
+    const threads: string[] = [];
+    const controller = new ProactiveController({
+      config: ACTIVE_CONFIG,
+      channel: createFakeChannel() as never,
+      store,
+      decisionProvider: new FakeDecisionProvider([]),
+      historySource: {
+        async listChatRoots() {
+          return [];
+        },
+        async listThread(_chatId, threadId) {
+          threads.push(threadId);
+          return [];
+        },
+      },
+      now: () => now,
+    });
+    await controller.load();
+
+    await controller.runReconciliation();
+    expect(threads).toEqual(['omt_recent']);
+    await controller.stop();
+  });
 });
 
 async function createHarness(results: DecisionResult[], now = Date.now()) {
