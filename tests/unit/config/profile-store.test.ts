@@ -248,6 +248,35 @@ describe('profile store canonical serialization', () => {
     });
   });
 
+  it('persists proactive observer safety settings across save→load round-trip', async () => {
+    const root = await tmpRoot();
+    const configPath = join(root, 'config.json');
+    const profile = createDefaultProfileConfig({ agentKind: 'claude', accounts: { app } });
+    profile.proactiveObserver = {
+      enabled: true,
+      mode: 'shadow',
+      allowedChats: ['oc_intern'],
+      actionThreshold: 0.85,
+      shadowThreshold: 0.6,
+      contextMessages: 20,
+      contextWindowHours: 24,
+      pollIntervalMs: 60_000,
+    };
+
+    await saveRootConfig({
+      schemaVersion: 2,
+      activeProfile: 'claude',
+      preferences: {},
+      profiles: { claude: profile },
+    }, configPath);
+
+    const saved = JSON.parse(await readFile(configPath, 'utf8'));
+    expect(saved.profiles.claude.proactiveObserver).toEqual(profile.proactiveObserver);
+
+    const loaded = await loadRootConfig(configPath);
+    expect(loaded?.profiles.claude?.proactiveObserver).toEqual(profile.proactiveObserver);
+  });
+
   it('marks newly created roots as already evaluated for permission default migration', () => {
     const profile = createDefaultProfileConfig({
       agentKind: 'claude',
