@@ -20,6 +20,7 @@ const ACTIVE_CONFIG: ProactiveObserverConfig = {
   timeZone: 'Asia/Shanghai',
   allowedChats: ['oc_intern'],
   actionThreshold: 0.85,
+  lowRiskActionThreshold: 0.6,
   shadowThreshold: 0.6,
   contextMessages: 20,
   contextWindowHours: 24,
@@ -65,6 +66,8 @@ describe('proactive follow-up controller', () => {
       status: 'pending',
     });
     expect(state.decisions.at(-1)?.outcome).toBe('applied');
+    expect(harness.channel.sent).toHaveLength(1);
+    expect(harness.channel.sent[0]?.options).toEqual({ replyTo: 'm-create' });
     await harness.controller.stop();
   });
 
@@ -124,12 +127,112 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
-  it('keeps medium-confidence decisions in shadow without mutating state', async () => {
-    const harness = await createHarness([{ action: 'create', confidence: 0.72 }]);
-    harness.controller.enqueue(message('m-shadow', 'oc_intern', '我明天交报告'));
+  it('creates a reversible follow-up at the low-risk threshold when the due time is explicit', async () => {
+    const now = Date.parse('2026-10-10T09:00:00.000Z');
+    const harness = await createHarness([{ action: 'create', confidence: 0.6 }], now);
+    harness.controller.enqueue(
+      message(
+        'm-shadow',
+        'oc_intern',
+        '我需要在 3 分钟后完成主动式智能体验收',
+        false,
+        now,
+        'omt_acceptance',
+      ),
+    );
+    await harness.controller.flush();
+    expect(harness.store.snapshot().followUps[0]).toMatchObject({
+      dueAt: now + 3 * 60_000,
+      threadId: 'omt_acceptance',
+    });
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('applied');
+    expect(harness.channel.sent).toHaveLength(1);
+    expect(harness.channel.sent[0]?.options).toEqual({
+      replyTo: 'm-shadow',
+      replyInThread: true,
+    });
+    expect(harness.channel.sent[0]?.content).toMatchObject({
+      card: {
+        header: { title: { content: '✅ 已记录主动跟进' } },
+      },
+    });
+    await harness.controller.stop();
+  });
+
+  it('keeps low-confidence create decisions below the low-risk threshold side-effect free', async () => {
+    const harness = await createHarness([{ action: 'create', confidence: 0.59 }]);
+    harness.controller.enqueue(message('m-low', 'oc_intern', '我明天交报告'));
     await harness.controller.flush();
     expect(harness.store.snapshot().followUps).toHaveLength(0);
+    expect(harness.channel.sent).toHaveLength(0);
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('ignored');
+    await harness.controller.stop();
+  });
+
+  it('keeps medium-confidence completion behind the high-risk threshold', async () => {
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.94 },
+        { action: 'complete', confidence: 0.72 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(message('m-open', 'oc_intern', '今天完成招聘周报', false, now));
+    harness.controller.enqueue(
+      message('m-maybe-done', 'oc_intern', '招聘周报好像搞定了', false, now + 1),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]?.status).toBe('pending');
     expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('shadow');
+    await harness.controller.stop();
+  });
+
+  it('allows medium-confidence postponement only when target and new due time are deterministic', async () => {
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.94 },
+        { action: 'postpone', confidence: 0.72 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(message('m-plan', 'oc_intern', '今天完成招聘周报', false, now));
+    harness.controller.enqueue(
+      message('m-postpone', 'oc_intern', '招聘周报延期到后天', false, now + 1),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]).toMatchObject({
+      status: 'pending',
+      dueAt: Date.parse('2026-10-11T10:00:00.000Z'),
+    });
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('applied');
+    await harness.controller.stop();
+  });
+
+  it('does not let another participant mutate the follow-up even at high confidence', async () => {
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.94 },
+        { action: 'cancel', confidence: 0.99 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(message('m-owned', 'oc_intern', '今天完成招聘周报', false, now));
+    harness.controller.enqueue({
+      ...message('m-other-cancel', 'oc_intern', '取消招聘周报', false, now + 1),
+      senderId: 'ou_other',
+    });
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]?.status).toBe('pending');
+    expect(harness.store.snapshot().decisions.at(-1)).toMatchObject({
+      outcome: 'ignored',
+      reason: 'owner-mismatch',
+    });
     await harness.controller.stop();
   });
 
@@ -296,8 +399,8 @@ describe('proactive follow-up controller', () => {
     );
     await first.controller.flush();
     await first.controller.runDueReminders();
-    expect(first.channel.sent).toHaveLength(1);
-    expect(first.channel.sent[0]?.chatId).toBe('oc_intern');
+    expect(first.channel.sent).toHaveLength(2);
+    expect(first.channel.sent.every((item) => item.chatId === 'oc_intern')).toBe(true);
     await first.controller.stop();
 
     const secondStore = new ProactiveStore(first.path);
@@ -373,7 +476,7 @@ describe('proactive follow-up controller', () => {
       harness.controller.runDueReminders(),
     ]);
 
-    expect(harness.channel.sent).toHaveLength(1);
+    expect(harness.channel.sent).toHaveLength(2);
     await harness.controller.stop();
   });
 
@@ -394,8 +497,9 @@ describe('proactive follow-up controller', () => {
 
     const followUp = harness.store.snapshot().followUps[0];
     expect(followUp?.status).toBe('completed');
+    const sentBeforeReminderTick = harness.channel.sent.length;
     await harness.controller.runDueReminders();
-    expect(harness.channel.sent).toHaveLength(0);
+    expect(harness.channel.sent).toHaveLength(sentBeforeReminderTick);
     await harness.controller.stop();
   });
 
@@ -414,6 +518,14 @@ describe('proactive follow-up controller', () => {
         'om_card',
       ),
     ).toBe(true);
+    expect(harness.store.getFollowUp(item.id)?.status).toBe('pending');
+
+    await harness.controller.handleCardAction(
+      { __proactive_follow_up: true, action: 'complete', followUpId: item.id },
+      'oc_intern',
+      'ou_other',
+      'om_card_other_user',
+    );
     expect(harness.store.getFollowUp(item.id)?.status).toBe('pending');
 
     await harness.controller.handleCardAction(

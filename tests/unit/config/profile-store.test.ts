@@ -258,6 +258,7 @@ describe('profile store canonical serialization', () => {
       timeZone: 'Asia/Shanghai',
       allowedChats: ['oc_intern'],
       actionThreshold: 0.85,
+      lowRiskActionThreshold: 0.6,
       shadowThreshold: 0.6,
       contextMessages: 20,
       contextWindowHours: 24,

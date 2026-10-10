@@ -313,6 +313,7 @@ Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` 
     "timeZone": "Asia/Shanghai",
     "allowedChats": ["oc_xxxxxxxxxxxxx"],
     "actionThreshold": 0.85,
+    "lowRiskActionThreshold": 0.6,
     "shadowThreshold": 0.6,
     "contextMessages": 20,
     "contextWindowHours": 24,
@@ -322,6 +323,8 @@ Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` 
 ```
 
 Start in `shadow` mode and label real chat traffic before switching to `active`. State is stored as `proactive-observer.json` in the profile directory with mode `0600`. The target chat must also remain in the existing `access.allowedChats`; the existing mentioned-message path is unchanged.
+
+Confidence is risk-tiered rather than governed by one global cutoff. `create` and owner-authored `postpone` may use `lowRiskActionThreshold` only after deterministic code finds an explicit due time and an unambiguous target. `complete` and `cancel` remain behind `actionThreshold`; explicit card clicks do not rely on model confidence but remain owner-only. A created follow-up immediately replies with a recorded card in the source thread so the user can see and undo the action.
 
 Reminder delivery is deliberately **at most once**. Feishu/Lark message creation does not provide an idempotency key, so the observer persists a delivery claim before sending. If the process loses the response after Feishu accepted the message, a restart will not send a duplicate. The trade-off is that a crash in the narrow claim-before-send window can suppress that reminder; postpone the follow-up to arm a new delivery attempt.
 
