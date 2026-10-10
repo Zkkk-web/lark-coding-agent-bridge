@@ -303,7 +303,7 @@ Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). Afte
 
 The observer reads non-mention text in explicitly allowlisted internal chats, uses Jev for structured intent classification, and records follow-ups only when the message contains an explicit due date. A due follow-up is reminded once in its source chat; completion, cancellation, and postponement survive restarts. Non-mention messages never enter Claude, Codex, or Hermes, and the observer does not mutate calendars, tasks, or Base records.
 
-Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` event, add the bot to the target chat, and set `TYPESAFE_API_KEY` in the service environment. Then add this field to the matching profile. `allowedChats` is an independent hard boundary and is required:
+Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` event, add the bot to the target chat, and set `TYPESAFE_API_KEY` in the service environment. Then add this field to the matching profile. `allowedChats` is an independent hard boundary and is required. Set `LARK_PROACTIVE_OBSERVER_DISABLED=1` as the process-wide emergency kill switch; it overrides every profile and takes effect after restart:
 
 ```json
 {

@@ -70,6 +70,7 @@ import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import { ProactiveController } from '../proactive/controller';
 import { JevDecisionProvider } from '../proactive/decision';
+import { isProactiveObserverGloballyDisabled } from '../proactive/kill-switch';
 import { ProactiveStore } from '../proactive/store';
 import type { DecisionProvider } from '../proactive/types';
 import {
@@ -281,7 +282,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   let proactiveObserver: ProactiveController | undefined;
-  if (controls.profileConfig.proactiveObserver.enabled) {
+  if (
+    controls.profileConfig.proactiveObserver.enabled &&
+    !isProactiveObserverGloballyDisabled()
+  ) {
     if (!deps.appPaths?.proactiveObserverFile) {
       log.warn('proactive', 'disabled-missing-state-path');
     } else {
@@ -682,7 +686,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     pool,
     proactiveObserver,
   } = deps;
-  const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
   const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
@@ -708,6 +711,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // flush — which reads `firstMsg.threadId` for reply routing and topic scope —
   // sees it.
   const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
+  const proactiveCandidate = proactiveObserver?.handles(emsg) ?? false;
+  const preview = proactiveCandidate
+    ? '[proactive-message-redacted]'
+    : msg.content.length > 80
+      ? `${msg.content.slice(0, 80)}…`
+      : msg.content;
   // Some groups are converted into topic groups after creation. In that state
   // getChatMode can lag behind the message event shape, so threadId is the
   // stronger signal for topic-scoped sessions and reply routing.
@@ -757,7 +766,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // before the mention gate. It sees only allowlisted, non-mention text and
   // never enters the coding-agent queue. Mentioned messages continue through
   // the exact pre-existing command/agent path below.
-  if (proactiveObserver?.handles(emsg)) {
+  if (proactiveCandidate && proactiveObserver) {
     proactiveObserver.enqueue(emsg);
     log.info('intake', 'proactive-observed', { scope, msgId: emsg.messageId });
     return;

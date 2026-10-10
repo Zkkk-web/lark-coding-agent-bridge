@@ -303,7 +303,7 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 观察器让 bot 在指定内部群里读取非 `@` 文本，用 Jev 做结构化意图判断，并在消息包含明确期限时记录跟进事项。到期后只向原群发送一次提醒；完成、取消或延期会持久化，重启不会重复提醒。它不会把非 `@` 消息交给 Claude、Codex 或 Hermes，也不会操作日历、任务或多维表格。
 
-先在飞书开放平台为应用开通 `im:message.group_msg`，订阅 `im.message.receive_v1`，把 bot 加入目标群，并在服务环境中设置 `TYPESAFE_API_KEY`。然后在对应 profile 添加下面的字段；`allowedChats` 是独立的硬白名单，不能省略：
+先在飞书开放平台为应用开通 `im:message.group_msg`，订阅 `im.message.receive_v1`，把 bot 加入目标群，并在服务环境中设置 `TYPESAFE_API_KEY`。然后在对应 profile 添加下面的字段；`allowedChats` 是独立的硬白名单，不能省略。紧急情况下可设置进程级开关 `LARK_PROACTIVE_OBSERVER_DISABLED=1`，它会覆盖所有 profile，重启后生效：
 
 ```json
 {

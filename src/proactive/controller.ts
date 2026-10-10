@@ -4,6 +4,7 @@ import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
 import { PROACTIVE_CARD_MARKER, reminderCard } from './cards';
 import { DAY_MS, parseExplicitDueAt } from './due';
+import { isProactiveObserverGloballyDisabled } from './kill-switch';
 import { ProactiveStore } from './store';
 import type {
   DecisionProvider,
@@ -19,6 +20,7 @@ export interface ProactiveControllerDeps {
   store: ProactiveStore;
   decisionProvider: DecisionProvider;
   now?: () => number;
+  globallyDisabled?: () => boolean;
 }
 
 export class ProactiveController {
@@ -27,10 +29,12 @@ export class ProactiveController {
   private reminderQueue: Promise<void> = Promise.resolve();
   private readonly allowedChats: ReadonlySet<string>;
   private readonly now: () => number;
+  private readonly globallyDisabled: () => boolean;
 
   constructor(private readonly deps: ProactiveControllerDeps) {
     this.allowedChats = new Set(deps.config.allowedChats);
     this.now = deps.now ?? Date.now;
+    this.globallyDisabled = deps.globallyDisabled ?? isProactiveObserverGloballyDisabled;
   }
 
   async load(): Promise<void> {
@@ -39,7 +43,7 @@ export class ProactiveController {
 
   handles(msg: NormalizedMessage): boolean {
     return (
-      this.deps.config.enabled &&
+      this.isEnabled() &&
       msg.chatType !== 'p2p' &&
       !msg.mentionedBot &&
       msg.rawContentType === 'text' &&
@@ -54,7 +58,7 @@ export class ProactiveController {
   }
 
   start(): void {
-    if (this.timer || !this.deps.config.enabled) return;
+    if (this.timer || !this.isEnabled()) return;
     this.timer = setInterval(
       () => void this.runDueReminders().catch((err) => log.fail('proactive', err, { step: 'tick' })),
       this.deps.config.pollIntervalMs,
@@ -82,6 +86,9 @@ export class ProactiveController {
     messageId: string,
   ): Promise<boolean> {
     if (!(PROACTIVE_CARD_MARKER in payload)) return false;
+    // Consume our own marker while disabled/Shadow, but leave the ledger
+    // untouched. Historical cards therefore cannot bypass a rollback.
+    if (!this.canAct()) return true;
     if (!this.allowedChats.has(chatId)) {
       log.warn('proactive', 'card-denied-chat', { chatId });
       return true;
@@ -123,7 +130,7 @@ export class ProactiveController {
   }
 
   private async runDueRemindersOnce(): Promise<void> {
-    if (this.deps.config.mode !== 'active') return;
+    if (!this.canAct()) return;
     for (const item of this.deps.store.dueFollowUps(this.now())) {
       if (!this.allowedChats.has(item.chatId)) {
         log.warn('proactive', 'reminder-denied-chat', { followUpId: item.id, chatId: item.chatId });
@@ -165,6 +172,7 @@ export class ProactiveController {
   }
 
   private async observe(msg: NormalizedMessage): Promise<void> {
+    if (!this.isEnabled()) return;
     if (this.deps.store.hasProcessed(msg.messageId)) {
       log.info('proactive', 'skip-duplicate-message', { msgId: msg.messageId });
       return;
@@ -275,7 +283,18 @@ export class ProactiveController {
       return { applied: true, followUpId: target.id };
     }
 
+    if (action === 'possible-complex-task') {
+      return { applied: false, reason: 'agent-escalation-disabled' };
+    }
     return { applied: false, reason: action === 'clarify' ? 'needs-clarification' : 'no-op' };
+  }
+
+  private isEnabled(): boolean {
+    return this.deps.config.enabled && !this.globallyDisabled();
+  }
+
+  private canAct(): boolean {
+    return this.isEnabled() && this.deps.config.mode === 'active';
   }
 
   private recordDecision(

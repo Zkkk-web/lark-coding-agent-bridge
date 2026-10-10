@@ -89,27 +89,35 @@ describe('proactive observer intake boundary', () => {
   it('routes allowlisted non-mentions only to the judge while mentions keep the agent path', async () => {
     const h = await createHarness({ proactive: true });
     const provider = new RecordingDecisionProvider();
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await startTestBridge(h, provider);
 
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_non_mention',
-        content: '明天把实习复盘发群里',
-        mentionedBot: false,
-      }),
-    );
-    await waitFor(() => provider.calls.length === 1);
-    expect(h.agent.runOptions).toHaveLength(0);
+    try {
+      await h.channel.handlers.message?.(
+        message({
+          messageId: 'om_non_mention',
+          content: '明天把实习复盘发群里',
+          mentionedBot: false,
+        }),
+      );
+      await waitFor(() => provider.calls.length === 1);
+      expect(h.agent.runOptions).toHaveLength(0);
+      const proactiveLogs = consoleLog.mock.calls.flat().map(String).join('\n');
+      expect(proactiveLogs).toContain('[proactive-message-redacted]');
+      expect(proactiveLogs).not.toContain('明天把实习复盘发群里');
 
-    await h.channel.handlers.message?.(
-      message({
-        messageId: 'om_mention',
-        content: '@Bridge 帮我检查复盘',
-        mentionedBot: true,
-      }),
-    );
-    await waitFor(() => h.agent.runOptions.length === 1);
-    expect(provider.calls).toHaveLength(1);
+      await h.channel.handlers.message?.(
+        message({
+          messageId: 'om_mention',
+          content: '@Bridge 帮我检查复盘',
+          mentionedBot: true,
+        }),
+      );
+      await waitFor(() => h.agent.runOptions.length === 1);
+      expect(provider.calls).toHaveLength(1);
+    } finally {
+      consoleLog.mockRestore();
+    }
   });
 });
 

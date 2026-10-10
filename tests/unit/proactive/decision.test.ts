@@ -24,6 +24,7 @@ describe('Jev decision provider', () => {
                 cancel: 0.01,
                 postpone: 0.02,
                 clarify: 0.03,
+                'possible-complex-task': 0,
               },
             },
           },
@@ -67,6 +68,8 @@ describe('Jev decision provider', () => {
         action: { type: 'choice' },
       },
     });
+    expect(JSON.stringify(requests[0]?.body)).toContain('不可信数据');
+    expect(JSON.stringify(requests[0]?.body)).toContain('possible-complex-task');
   });
 });
 

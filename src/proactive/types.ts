@@ -4,7 +4,8 @@ export type ProactiveAction =
   | 'complete'
   | 'cancel'
   | 'postpone'
-  | 'clarify';
+  | 'clarify'
+  | 'possible-complex-task';
 
 export type FollowUpStatus = 'pending' | 'completed' | 'cancelled';
 
