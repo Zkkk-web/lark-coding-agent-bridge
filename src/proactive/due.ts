@@ -1,38 +1,67 @@
 const DAY_MS = 24 * 60 * 60 * 1_000;
+export const DEFAULT_PROACTIVE_TIME_ZONE = 'Asia/Shanghai';
+
+interface CalendarDate {
+  year: number;
+  month: number;
+  day: number;
+}
+
+interface CalendarDateTime extends CalendarDate {
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+interface ClockTime {
+  hour: number;
+  minute: number;
+}
 
 /** Parse only dates that are explicitly present in the message. */
-export function parseExplicitDueAt(text: string, now: number): number | undefined {
+export function parseExplicitDueAt(
+  text: string,
+  now: number,
+  timeZone = DEFAULT_PROACTIVE_TIME_ZONE,
+): number | undefined {
+  const today = zonedParts(now, timeZone);
+  const clock = parseExplicitClock(text) ?? { hour: 18, minute: 0 };
   const relative = text.match(/([一二三四五六七八九十\d]{1,3})\s*天后/);
   if (relative?.[1]) {
     const days = parseDayCount(relative[1]);
-    if (days !== undefined) return endOfWorkday(addDays(now, days));
+    if (days !== undefined) return zonedDate(addCalendarDays(today, days), clock, timeZone);
   }
 
-  if (/大后天/.test(text)) return endOfWorkday(addDays(now, 3));
-  if (/后天/.test(text)) return endOfWorkday(addDays(now, 2));
-  if (/明天|明日/.test(text)) return endOfWorkday(addDays(now, 1));
-  if (/今天|今日|今晚/.test(text)) return endOfWorkday(now);
+  if (/大后天/.test(text)) return zonedDate(addCalendarDays(today, 3), clock, timeZone);
+  if (/后天/.test(text)) return zonedDate(addCalendarDays(today, 2), clock, timeZone);
+  if (/明天|明日/.test(text)) return zonedDate(addCalendarDays(today, 1), clock, timeZone);
+  if (/今天|今日|今晚/.test(text)) return zonedDate(today, clock, timeZone);
 
-  const iso = text.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):?(\d{2})?)?/);
+  const iso = text.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})/);
   if (iso) {
-    return localDate(Number(iso[1]), Number(iso[2]), Number(iso[3]), iso[4], iso[5]);
+    return zonedDate(
+      { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) },
+      clock,
+      timeZone,
+    );
   }
 
-  const monthDay = text.match(/(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})[日号]?(?:\s*(\d{1,2})(?::|点)(\d{1,2})?分?)?/);
+  const monthDay = text.match(/(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})[日号]?/);
   if (monthDay) {
-    const base = new Date(now);
-    let year = monthDay[1] ? Number(monthDay[1]) : base.getFullYear();
-    let candidate = localDate(
-      year,
-      Number(monthDay[2]),
-      Number(monthDay[3]),
-      monthDay[4],
-      monthDay[5],
+    let year = monthDay[1] ? Number(monthDay[1]) : today.year;
+    let candidate = zonedDate(
+      { year, month: Number(monthDay[2]), day: Number(monthDay[3]) },
+      clock,
+      timeZone,
     );
     if (candidate === undefined) return undefined;
     if (!monthDay[1] && candidate < now) {
       year += 1;
-      candidate = localDate(year, Number(monthDay[2]), Number(monthDay[3]), monthDay[4], monthDay[5]);
+      candidate = zonedDate(
+        { year, month: Number(monthDay[2]), day: Number(monthDay[3]) },
+        clock,
+        timeZone,
+      );
     }
     return candidate;
   }
@@ -42,56 +71,160 @@ export function parseExplicitDueAt(text: string, now: number): number | undefine
     const captured = weekday[1];
     if (!captured) return undefined;
     const wanted = '日一二三四五六'.indexOf(captured === '天' ? '日' : captured);
-    const today = new Date(now).getDay();
-    let delta = (wanted - today + 7) % 7;
-    if (/下(?:周|星期)/.test(text)) delta += delta === 0 ? 7 : 7;
-    else if (delta === 0 && endOfWorkday(now) <= now) delta = 7;
-    return endOfWorkday(addDays(now, delta));
+    const todayWeekday = new Date(Date.UTC(today.year, today.month - 1, today.day)).getUTCDay();
+    let delta: number;
+    if (/下(?:周|星期)/.test(text)) {
+      const daysToNextMonday = (8 - todayWeekday) % 7 || 7;
+      const daysFromMonday = wanted === 0 ? 6 : wanted - 1;
+      delta = daysToNextMonday + daysFromMonday;
+    } else {
+      delta = (wanted - todayWeekday + 7) % 7;
+      const candidate = zonedDate(addCalendarDays(today, delta), clock, timeZone);
+      if (delta === 0 && candidate !== undefined && candidate <= now) delta = 7;
+    }
+    return zonedDate(addCalendarDays(today, delta), clock, timeZone);
   }
 
   return undefined;
 }
 
-function addDays(timestamp: number, days: number): number {
-  const date = new Date(timestamp);
-  date.setDate(date.getDate() + days);
-  return date.getTime();
+function addCalendarDays(date: CalendarDate, days: number): CalendarDate {
+  const shifted = new Date(Date.UTC(date.year, date.month - 1, date.day + days));
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+  };
 }
 
-function endOfWorkday(timestamp: number): number {
-  const date = new Date(timestamp);
-  date.setHours(18, 0, 0, 0);
-  return date.getTime();
-}
-
-function localDate(
-  year: number,
-  month: number,
-  day: number,
-  hour?: string,
-  minute?: string,
+function zonedDate(
+  date: CalendarDate,
+  clock: ClockTime,
+  timeZone: string,
 ): number | undefined {
-  const date = new Date(
-    year,
-    month - 1,
-    day,
-    hour === undefined ? 18 : Number(hour),
-    minute === undefined ? 0 : Number(minute),
+  if (!validCalendarDate(date) || !validClock(clock)) return undefined;
+  const target: CalendarDateTime = { ...date, ...clock, second: 0 };
+  let candidate = Date.UTC(
+    target.year,
+    target.month - 1,
+    target.day,
+    target.hour,
+    target.minute,
     0,
     0,
   );
-  if (
-    date.getFullYear() !== year ||
-    date.getMonth() !== month - 1 ||
-    date.getDate() !== day
-  ) {
-    return undefined;
+
+  // Convert a wall-clock time in an IANA zone into an instant. Re-evaluating
+  // the offset handles zones with daylight-saving changes without mutating
+  // process.env.TZ or depending on the host/container timezone.
+  for (let i = 0; i < 4; i++) {
+    const observed = zonedParts(candidate, timeZone);
+    const difference = calendarAsUtc(target) - calendarAsUtc(observed);
+    if (difference === 0) break;
+    candidate += difference;
   }
-  return date.getTime();
+
+  const observed = zonedParts(candidate, timeZone);
+  return sameCalendarDateTime(observed, target) ? candidate : undefined;
 }
 
-export function formatDueAt(timestamp: number): string {
+function zonedParts(timestamp: number, timeZone: string): CalendarDateTime {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(timestamp));
+  const value = (type: Intl.DateTimeFormatPartTypes): number =>
+    Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: value('year'),
+    month: value('month'),
+    day: value('day'),
+    hour: value('hour'),
+    minute: value('minute'),
+    second: value('second'),
+  };
+}
+
+function calendarAsUtc(value: CalendarDateTime): number {
+  return Date.UTC(
+    value.year,
+    value.month - 1,
+    value.day,
+    value.hour,
+    value.minute,
+    value.second,
+  );
+}
+
+function sameCalendarDateTime(a: CalendarDateTime, b: CalendarDateTime): boolean {
+  return (
+    a.year === b.year &&
+    a.month === b.month &&
+    a.day === b.day &&
+    a.hour === b.hour &&
+    a.minute === b.minute &&
+    a.second === b.second
+  );
+}
+
+function validCalendarDate(value: CalendarDate): boolean {
+  const date = new Date(Date.UTC(value.year, value.month - 1, value.day));
+  return (
+    date.getUTCFullYear() === value.year &&
+    date.getUTCMonth() === value.month - 1 &&
+    date.getUTCDate() === value.day
+  );
+}
+
+function validClock(value: ClockTime): boolean {
+  return (
+    Number.isInteger(value.hour) &&
+    value.hour >= 0 &&
+    value.hour <= 23 &&
+    Number.isInteger(value.minute) &&
+    value.minute >= 0 &&
+    value.minute <= 59
+  );
+}
+
+function parseExplicitClock(text: string): ClockTime | undefined {
+  const match = text.match(
+    /(?:(上午|中午|下午|傍晚|晚上|晚间|今晚)\s*)?(\d{1,2})\s*(?::|点|时)\s*(\d{1,2})?\s*分?/,
+  );
+  if (!match?.[2]) return undefined;
+  let hour = Number(match[2]);
+  const minute = match[3] === undefined ? 0 : Number(match[3]);
+  const period = match[1];
+  if (
+    (period === '下午' ||
+      period === '傍晚' ||
+      period === '晚上' ||
+      period === '晚间' ||
+      period === '今晚') &&
+    hour < 12
+  ) {
+    hour += 12;
+  } else if (period === '中午' && hour < 11) {
+    hour += 12;
+  } else if (period === '上午' && hour === 12) {
+    hour = 0;
+  }
+  const clock = { hour, minute };
+  return validClock(clock) ? clock : undefined;
+}
+
+export function formatDueAt(
+  timestamp: number,
+  timeZone = DEFAULT_PROACTIVE_TIME_ZONE,
+): string {
   return new Intl.DateTimeFormat('zh-CN', {
+    timeZone,
     month: 'numeric',
     day: 'numeric',
     hour: '2-digit',

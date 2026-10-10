@@ -255,6 +255,7 @@ describe('profile store canonical serialization', () => {
     profile.proactiveObserver = {
       enabled: true,
       mode: 'shadow',
+      timeZone: 'Asia/Shanghai',
       allowedChats: ['oc_intern'],
       actionThreshold: 0.85,
       shadowThreshold: 0.6,

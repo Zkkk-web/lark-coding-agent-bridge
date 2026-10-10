@@ -310,6 +310,7 @@ Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` 
   "proactiveObserver": {
     "enabled": true,
     "mode": "shadow",
+    "timeZone": "Asia/Shanghai",
     "allowedChats": ["oc_xxxxxxxxxxxxx"],
     "actionThreshold": 0.85,
     "shadowThreshold": 0.6,

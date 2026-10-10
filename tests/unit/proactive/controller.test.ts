@@ -16,6 +16,7 @@ import { createFakeChannel } from '../../helpers/fake-channel';
 const ACTIVE_CONFIG: ProactiveObserverConfig = {
   enabled: true,
   mode: 'active',
+  timeZone: 'Asia/Shanghai',
   allowedChats: ['oc_intern'],
   actionThreshold: 0.85,
   shadowThreshold: 0.6,
@@ -46,7 +47,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('creates one persisted follow-up for a high-confidence explicit commitment', async () => {
-    const now = new Date(2026, 9, 9, 10).getTime();
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
     const harness = await createHarness([{ action: 'create', confidence: 0.94 }], now);
     const msg = message('m-create', 'oc_intern', '我明天 18 点前把候选人反馈发群里', false, now);
     harness.controller.enqueue(msg);
@@ -59,6 +60,7 @@ describe('proactive follow-up controller', () => {
     expect(state.followUps[0]).toMatchObject({
       chatId: 'oc_intern',
       sourceMessageId: 'm-create',
+      dueAt: Date.parse('2026-10-10T10:00:00.000Z'),
       status: 'pending',
     });
     expect(state.decisions.at(-1)?.outcome).toBe('applied');
@@ -75,7 +77,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('never sends reminders while the observer is in shadow mode', async () => {
-    const now = new Date(2026, 9, 9, 20).getTime();
+    const now = Date.parse('2026-10-09T12:00:00.000Z');
     const harness = await createHarness([{ action: 'create', confidence: 0.99 }], now);
     harness.store.createFollowUp({
       id: 'fu_shadow',
@@ -102,7 +104,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('persists reminder idempotency across restart and never sends outside the allowlist', async () => {
-    const now = new Date(2026, 9, 9, 20).getTime();
+    const now = Date.parse('2026-10-09T12:00:00.000Z');
     const first = await createHarness([{ action: 'create', confidence: 0.99 }], now);
     first.controller.enqueue(
       message('m-due', 'oc_intern', '今天要把实习生名单确认好', false, now - 10_000),
@@ -129,7 +131,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('claims a reminder durably before delivery so an ambiguous send failure is not duplicated after restart', async () => {
-    const now = new Date(2026, 9, 9, 20).getTime();
+    const now = Date.parse('2026-10-09T12:00:00.000Z');
     const first = await createHarness([{ action: 'create', confidence: 0.99 }], now);
     first.controller.enqueue(
       message('m-ambiguous', 'oc_intern', '今天要把面试反馈发群里', false, now - 10_000),
@@ -174,7 +176,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('serializes overlapping reminder ticks', async () => {
-    const now = new Date(2026, 9, 9, 20).getTime();
+    const now = Date.parse('2026-10-09T12:00:00.000Z');
     const harness = await createHarness([{ action: 'create', confidence: 0.99 }], now);
     harness.controller.enqueue(
       message('m-overlap', 'oc_intern', '今天要把录用名单发群里', false, now - 10_000),
@@ -191,7 +193,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('complete, cancel, and postpone transitions suppress stale reminders', async () => {
-    const now = new Date(2026, 9, 9, 10).getTime();
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
     const harness = await createHarness(
       [
         { action: 'create', confidence: 0.99 },
@@ -213,7 +215,7 @@ describe('proactive follow-up controller', () => {
   });
 
   it('applies reminder card actions only when chat and record match', async () => {
-    const now = new Date(2026, 9, 9, 10).getTime();
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
     const harness = await createHarness([{ action: 'create', confidence: 0.99 }], now);
     harness.controller.enqueue(message('m-card', 'oc_intern', '今天完成投递复盘', false, now));
     await harness.controller.flush();

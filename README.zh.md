@@ -310,6 +310,7 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
   "proactiveObserver": {
     "enabled": true,
     "mode": "shadow",
+    "timeZone": "Asia/Shanghai",
     "allowedChats": ["oc_xxxxxxxxxxxxx"],
     "actionThreshold": 0.85,
     "shadowThreshold": 0.6,

@@ -295,6 +295,7 @@ async function createHarness(options: { proactive?: boolean } = {}): Promise<{
     profileConfig.proactiveObserver = {
       enabled: true,
       mode: 'shadow',
+      timeZone: 'Asia/Shanghai',
       allowedChats: ['oc_chat'],
       actionThreshold: 0.85,
       shadowThreshold: 0.6,

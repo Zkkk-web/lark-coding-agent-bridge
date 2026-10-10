@@ -34,6 +34,8 @@ export interface ProfileAccess {
 export interface ProactiveObserverConfig {
   enabled: boolean;
   mode: 'shadow' | 'active';
+  /** IANA timezone used for parsing and displaying human due dates. */
+  timeZone: string;
   /** Hard outbound and intake boundary. No proactive path may operate outside these chats. */
   allowedChats: string[];
   /** Decisions at or above this confidence may mutate follow-up state in active mode. */
@@ -329,6 +331,7 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
   return {
     enabled: raw.enabled === true,
     mode: raw.mode === 'active' ? 'active' : 'shadow',
+    timeZone: validTimeZone(raw.timeZone) ? raw.timeZone : 'Asia/Shanghai',
     allowedChats: stringArray(raw.allowedChats),
     actionThreshold,
     shadowThreshold,
@@ -336,6 +339,16 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
     contextWindowHours: boundedInteger(raw.contextWindowHours, 24, 1, 168),
     pollIntervalMs: boundedInteger(raw.pollIntervalMs, 60_000, 1_000, 60 * 60 * 1_000),
   };
+}
+
+function validTimeZone(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function probabilityOr(value: unknown, fallback: number): number {

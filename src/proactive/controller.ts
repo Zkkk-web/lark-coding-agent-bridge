@@ -149,7 +149,9 @@ export class ProactiveController {
         continue;
       }
 
-      const result = await this.deps.channel.send(item.chatId, { card: reminderCard(claimed) });
+      const result = await this.deps.channel.send(item.chatId, {
+        card: reminderCard(claimed, this.deps.config.timeZone),
+      });
       const sentAt = this.now();
       this.deps.store.updateFollowUp(item.id, {
         reminderSentAt: sentAt,
@@ -227,7 +229,7 @@ export class ProactiveController {
     now: number,
   ): { applied: boolean; followUpId?: string; reason?: string } {
     if (action === 'create') {
-      const dueAt = parseExplicitDueAt(message.text, now);
+      const dueAt = parseExplicitDueAt(message.text, now, this.deps.config.timeZone);
       if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
       const id = `fu_${createHash('sha256')
         .update(`${message.chatId}:${message.messageId}`)
@@ -253,7 +255,7 @@ export class ProactiveController {
       const target = selectTarget(message.text, this.deps.store.pendingFollowUps(message.chatId));
       if (!target) return { applied: false, reason: 'no-unambiguous-target' };
       if (action === 'postpone') {
-        const dueAt = parseExplicitDueAt(message.text, now);
+        const dueAt = parseExplicitDueAt(message.text, now, this.deps.config.timeZone);
         if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
         this.deps.store.updateFollowUp(target.id, {
           dueAt,

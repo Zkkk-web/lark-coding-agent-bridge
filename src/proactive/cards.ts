@@ -3,7 +3,7 @@ import type { FollowUp } from './types';
 
 export const PROACTIVE_CARD_MARKER = '__proactive_follow_up';
 
-export function reminderCard(item: FollowUp): object {
+export function reminderCard(item: FollowUp, timeZone?: string): object {
   return {
     config: { wide_screen_mode: true },
     header: {
@@ -15,7 +15,7 @@ export function reminderCard(item: FollowUp): object {
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `**事项**：${escapeMd(item.summary)}\n**原定时间**：${formatDueAt(item.dueAt)}`,
+          content: `**事项**：${escapeMd(item.summary)}\n**原定时间**：${formatDueAt(item.dueAt, timeZone)}`,
         },
       },
       {
