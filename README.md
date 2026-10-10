@@ -322,6 +322,8 @@ Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` 
 
 Start in `shadow` mode and label real chat traffic before switching to `active`. State is stored as `proactive-observer.json` in the profile directory with mode `0600`. The target chat must also remain in the existing `access.allowedChats`; the existing mentioned-message path is unchanged.
 
+Reminder delivery is deliberately **at most once**. Feishu/Lark message creation does not provide an idempotency key, so the observer persists a delivery claim before sending. If the process loses the response after Feishu accepted the message, a restart will not send a duplicate. The trade-off is that a crash in the narrow claim-before-send window can suppress that reminder; postpone the follow-up to arm a new delivery attempt.
+
 ## Cloud-doc comments
 
 Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.

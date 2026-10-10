@@ -27,7 +27,14 @@ export interface FollowUp {
   status: FollowUpStatus;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Persisted before the outbound call. Feishu message creation has no
+   * idempotency key, so an attempted reminder is never retried automatically
+   * after an ambiguous transport failure.
+   */
+  reminderAttemptedAt?: number;
   reminderSentAt?: number;
+  reminderMessageId?: string;
   resolutionMessageId?: string;
 }
 

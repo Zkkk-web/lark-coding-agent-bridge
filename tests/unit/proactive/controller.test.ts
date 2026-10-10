@@ -128,6 +128,68 @@ describe('proactive follow-up controller', () => {
     await second.stop();
   });
 
+  it('claims a reminder durably before delivery so an ambiguous send failure is not duplicated after restart', async () => {
+    const now = new Date(2026, 9, 9, 20).getTime();
+    const first = await createHarness([{ action: 'create', confidence: 0.99 }], now);
+    first.controller.enqueue(
+      message('m-ambiguous', 'oc_intern', '今天要把面试反馈发群里', false, now - 10_000),
+    );
+    await first.controller.flush();
+
+    const delivered: unknown[] = [];
+    const uncertainController = new ProactiveController({
+      config: ACTIVE_CONFIG,
+      channel: {
+        async send(_chatId: string, content: unknown) {
+          delivered.push(content);
+          throw new Error('connection closed after request was accepted');
+        },
+      } as never,
+      store: first.store,
+      decisionProvider: first.provider,
+      now: () => now,
+    });
+    await expect(uncertainController.runDueReminders()).rejects.toThrow('connection closed');
+    expect(delivered).toHaveLength(1);
+    await uncertainController.stop();
+
+    const restartedStore = new ProactiveStore(first.path);
+    const restartedChannel = createFakeChannel();
+    const restarted = new ProactiveController({
+      config: ACTIVE_CONFIG,
+      channel: restartedChannel as never,
+      store: restartedStore,
+      decisionProvider: new FakeDecisionProvider([]),
+      now: () => now + 1_000,
+    });
+    await restarted.load();
+    await restarted.runDueReminders();
+
+    expect(restartedChannel.sent).toHaveLength(0);
+    expect(restartedStore.snapshot().followUps[0]).toMatchObject({
+      reminderAttemptedAt: now,
+    });
+    await restarted.stop();
+    await first.controller.stop();
+  });
+
+  it('serializes overlapping reminder ticks', async () => {
+    const now = new Date(2026, 9, 9, 20).getTime();
+    const harness = await createHarness([{ action: 'create', confidence: 0.99 }], now);
+    harness.controller.enqueue(
+      message('m-overlap', 'oc_intern', '今天要把录用名单发群里', false, now - 10_000),
+    );
+    await harness.controller.flush();
+
+    await Promise.all([
+      harness.controller.runDueReminders(),
+      harness.controller.runDueReminders(),
+    ]);
+
+    expect(harness.channel.sent).toHaveLength(1);
+    await harness.controller.stop();
+  });
+
   it('complete, cancel, and postpone transitions suppress stale reminders', async () => {
     const now = new Date(2026, 9, 9, 10).getTime();
     const harness = await createHarness(

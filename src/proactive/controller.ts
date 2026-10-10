@@ -24,6 +24,7 @@ export interface ProactiveControllerDeps {
 export class ProactiveController {
   private timer: NodeJS.Timeout | undefined;
   private queue: Promise<void> = Promise.resolve();
+  private reminderQueue: Promise<void> = Promise.resolve();
   private readonly allowedChats: ReadonlySet<string>;
   private readonly now: () => number;
 
@@ -70,6 +71,7 @@ export class ProactiveController {
 
   async flush(): Promise<void> {
     await this.queue;
+    await this.reminderQueue;
     await this.deps.store.flush();
   }
 
@@ -100,29 +102,61 @@ export class ProactiveController {
       this.deps.store.updateFollowUp(id, {
         dueAt: now + DAY_MS,
         updatedAt: now,
+        reminderAttemptedAt: undefined,
         reminderSentAt: undefined,
+        reminderMessageId: undefined,
         resolutionMessageId: messageId,
       });
     } else {
       return true;
     }
+    await this.deps.store.flush();
     log.info('proactive', 'card-applied', { action, followUpId: id, operatorId });
     reportMetric('proactive_action', 1, { action: String(action) });
     return true;
   }
 
   async runDueReminders(): Promise<void> {
+    const run = this.reminderQueue.then(() => this.runDueRemindersOnce());
+    this.reminderQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async runDueRemindersOnce(): Promise<void> {
     if (this.deps.config.mode !== 'active') return;
     for (const item of this.deps.store.dueFollowUps(this.now())) {
       if (!this.allowedChats.has(item.chatId)) {
         log.warn('proactive', 'reminder-denied-chat', { followUpId: item.id, chatId: item.chatId });
         continue;
       }
-      await this.deps.channel.send(item.chatId, { card: reminderCard(item) });
+      const attemptedAt = this.now();
       this.deps.store.updateFollowUp(item.id, {
-        reminderSentAt: this.now(),
-        updatedAt: this.now(),
+        reminderAttemptedAt: attemptedAt,
+        updatedAt: attemptedAt,
       });
+      // The claim must be durable before delivery. Feishu explicitly does not
+      // provide idempotent message creation, so retrying an ambiguous failure
+      // can produce duplicate reminders after a crash or lost response.
+      await this.deps.store.flush();
+
+      const claimed = this.deps.store.getFollowUp(item.id);
+      if (
+        !claimed ||
+        claimed.status !== 'pending' ||
+        claimed.dueAt > this.now() ||
+        claimed.reminderAttemptedAt !== attemptedAt
+      ) {
+        continue;
+      }
+
+      const result = await this.deps.channel.send(item.chatId, { card: reminderCard(claimed) });
+      const sentAt = this.now();
+      this.deps.store.updateFollowUp(item.id, {
+        reminderSentAt: sentAt,
+        reminderMessageId: result.messageId,
+        updatedAt: sentAt,
+      });
+      await this.deps.store.flush();
       reportMetric('proactive_reminder_sent', 1, { mode: this.deps.config.mode });
       log.info('proactive', 'reminder-sent', { followUpId: item.id, chatId: item.chatId });
     }
@@ -223,7 +257,9 @@ export class ProactiveController {
         if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
         this.deps.store.updateFollowUp(target.id, {
           dueAt,
+          reminderAttemptedAt: undefined,
           reminderSentAt: undefined,
+          reminderMessageId: undefined,
           updatedAt: now,
           resolutionMessageId: message.messageId,
         });

@@ -23,6 +23,7 @@ const MAX_PROCESSED = 5_000;
 export class ProactiveStore {
   private state: ProactiveState = structuredClone(EMPTY_STATE);
   private saving: Promise<void> = Promise.resolve();
+  private saveError: unknown;
 
   constructor(private readonly path: string) {}
 
@@ -78,6 +79,7 @@ export class ProactiveStore {
       (item) =>
         item.status === 'pending' &&
         item.dueAt <= now &&
+        item.reminderAttemptedAt === undefined &&
         item.reminderSentAt === undefined,
     );
   }
@@ -115,6 +117,7 @@ export class ProactiveStore {
 
   async flush(): Promise<void> {
     await this.saving;
+    if (this.saveError) throw this.saveError;
   }
 
   private trim(): void {
@@ -125,9 +128,15 @@ export class ProactiveStore {
 
   private persist(): void {
     const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
-    this.saving = this.saving
-      .then(() => writeFileAtomic(this.path, serialized, { mode: 0o600 }))
-      .catch((err: unknown) => log.fail('proactive', err, { step: 'persist' }));
+    this.saving = this.saving.then(async () => {
+      try {
+        await writeFileAtomic(this.path, serialized, { mode: 0o600 });
+        this.saveError = undefined;
+      } catch (err) {
+        this.saveError = err;
+        log.fail('proactive', err, { step: 'persist' });
+      }
+    });
   }
 }
 
