@@ -49,6 +49,13 @@ export class ProactiveStore {
     return this.state.processedMessageIds.includes(messageId);
   }
 
+  latestMessageTime(): number | undefined {
+    return this.state.messages.reduce<number | undefined>(
+      (latest, item) => (latest === undefined || item.createTime > latest ? item.createTime : latest),
+      undefined,
+    );
+  }
+
   recordMessage(message: ObserverMessage): void {
     this.state.messages.push(message);
     this.state.processedMessageIds.push(message.messageId);

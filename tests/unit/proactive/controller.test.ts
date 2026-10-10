@@ -5,6 +5,7 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import { describe, expect, it } from 'vitest';
 import type { ProactiveObserverConfig } from '../../../src/config/profile-schema';
 import { ProactiveController } from '../../../src/proactive/controller';
+import type { ProactiveHistorySource } from '../../../src/proactive/history';
 import { ProactiveStore } from '../../../src/proactive/store';
 import type {
   DecisionInput,
@@ -423,6 +424,62 @@ describe('proactive follow-up controller', () => {
     );
     expect(harness.store.getFollowUp(item.id)?.status).toBe('completed');
     await harness.controller.stop();
+  });
+
+  it('recovers a missed thread reply from history and resolves the pending follow-up once', async () => {
+    const now = Date.parse('2026-10-10T07:47:00.000Z');
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-recovery-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    store.createFollowUp({
+      id: 'fu_recovered',
+      chatId: 'oc_intern',
+      threadId: 'omt_topic',
+      sourceMessageId: 'm_source',
+      summary: '主动跟进测试',
+      ownerId: 'ou_user',
+      dueAt: now - 1,
+      status: 'pending',
+      createdAt: now - 60_000,
+      updatedAt: now - 60_000,
+    });
+    const recovered = {
+      messageId: 'm_missed_complete',
+      chatId: 'oc_intern',
+      threadId: 'omt_topic',
+      senderId: 'ou_user',
+      text: '当前唯一待办已经完成，请立即标记为已完成。',
+      createTime: now - 1_000,
+    };
+    const source: ProactiveHistorySource = {
+      async listChatRoots() {
+        return [];
+      },
+      async listThread() {
+        return [recovered];
+      },
+    };
+    const provider = new FakeDecisionProvider([{ action: 'complete', confidence: 0.99 }]);
+    const gaps: number[] = [];
+    const controller = new ProactiveController({
+      config: ACTIVE_CONFIG,
+      channel: createFakeChannel() as never,
+      store,
+      decisionProvider: provider,
+      historySource: source,
+      onGapDetected: (count) => gaps.push(count),
+      now: () => now,
+    });
+    await controller.load();
+
+    expect(await controller.runReconciliation()).toBe(1);
+    expect(await controller.runReconciliation()).toBe(0);
+    expect(store.getFollowUp('fu_recovered')).toMatchObject({
+      status: 'completed',
+      resolutionMessageId: 'm_missed_complete',
+    });
+    expect(provider.calls).toHaveLength(1);
+    expect(gaps).toEqual([1]);
+    await controller.stop();
   });
 });
 

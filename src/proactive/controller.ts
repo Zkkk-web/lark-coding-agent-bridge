@@ -4,6 +4,7 @@ import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
 import { PROACTIVE_CARD_MARKER, reminderCard } from './cards';
 import { DAY_MS, parseExplicitDueAt } from './due';
+import type { ProactiveHistorySource } from './history';
 import { isProactiveObserverGloballyDisabled } from './kill-switch';
 import { ProactiveStore } from './store';
 import type {
@@ -19,6 +20,9 @@ export interface ProactiveControllerDeps {
   channel: Pick<LarkChannel, 'send'>;
   store: ProactiveStore;
   decisionProvider: DecisionProvider;
+  historySource?: ProactiveHistorySource;
+  /** Called after a missed push event is durably recovered from history. */
+  onGapDetected?: (recovered: number) => void;
   now?: () => number;
   globallyDisabled?: () => boolean;
 }
@@ -27,9 +31,11 @@ export class ProactiveController {
   private timer: NodeJS.Timeout | undefined;
   private queue: Promise<void> = Promise.resolve();
   private reminderQueue: Promise<void> = Promise.resolve();
+  private tickQueue: Promise<void> = Promise.resolve();
   private readonly allowedChats: ReadonlySet<string>;
   private readonly now: () => number;
   private readonly globallyDisabled: () => boolean;
+  private recoverySince: number | undefined;
 
   constructor(private readonly deps: ProactiveControllerDeps) {
     this.allowedChats = new Set(deps.config.allowedChats);
@@ -39,6 +45,10 @@ export class ProactiveController {
 
   async load(): Promise<void> {
     await this.deps.store.load();
+    const latest = this.deps.store.latestMessageTime();
+    // Keep a small overlap for eventually-consistent history results. On a
+    // brand-new ledger, start at boot instead of acting on an old backlog.
+    this.recoverySince = latest === undefined ? this.now() : Math.max(0, latest - 60_000);
   }
 
   handles(msg: NormalizedMessage): boolean {
@@ -60,11 +70,11 @@ export class ProactiveController {
   start(): void {
     if (this.timer || !this.isEnabled()) return;
     this.timer = setInterval(
-      () => void this.runDueReminders().catch((err) => log.fail('proactive', err, { step: 'tick' })),
+      () => void this.runTick().catch((err) => log.fail('proactive', err, { step: 'tick' })),
       this.deps.config.pollIntervalMs,
     );
     this.timer.unref?.();
-    void this.runDueReminders().catch((err) => log.fail('proactive', err, { step: 'initial-tick' }));
+    void this.runTick().catch((err) => log.fail('proactive', err, { step: 'initial-tick' }));
   }
 
   async stop(): Promise<void> {
@@ -76,7 +86,67 @@ export class ProactiveController {
   async flush(): Promise<void> {
     await this.queue;
     await this.reminderQueue;
+    await this.tickQueue;
     await this.deps.store.flush();
+  }
+
+  async runReconciliation(): Promise<number> {
+    if (!this.isEnabled() || !this.deps.historySource) return 0;
+    const since = this.recoverySince ?? this.now();
+    const cycleStartedAt = this.now();
+    let recovered = 0;
+
+    const accept = (messages: ObserverMessage[]): void => {
+      for (const message of messages) {
+        if (!this.allowedChats.has(message.chatId) || this.deps.store.hasProcessed(message.messageId)) {
+          continue;
+        }
+        recovered++;
+        this.queue = this.queue
+          .then(() => this.observeRecovered(message))
+          .catch((err: unknown) => log.fail('proactive', err, { step: 'recover-message' }));
+      }
+    };
+
+    for (const chatId of this.allowedChats) {
+      try {
+        accept(await this.deps.historySource.listChatRoots(chatId, since));
+      } catch (err) {
+        log.warn('proactive', 'history-chat-failed', { chatId, err: String(err) });
+      }
+    }
+
+    await this.queue;
+    const pendingThreads = new Map<string, string>();
+    for (const followUp of this.deps.store.snapshot().followUps) {
+      if (
+        followUp.status === 'pending' &&
+        followUp.threadId &&
+        this.allowedChats.has(followUp.chatId)
+      ) {
+        pendingThreads.set(`${followUp.chatId}:${followUp.threadId}`, followUp.chatId);
+      }
+    }
+    for (const [key, chatId] of pendingThreads) {
+      const threadId = key.slice(chatId.length + 1);
+      try {
+        accept(await this.deps.historySource.listThread(chatId, threadId, since));
+      } catch (err) {
+        log.warn('proactive', 'history-thread-failed', { chatId, threadId, err: String(err) });
+      }
+    }
+
+    await this.queue;
+    await this.deps.store.flush();
+    // Retain five minutes of overlap so late history indexing cannot create a
+    // blind spot. Processed-message ids make repeat reads harmless.
+    this.recoverySince = Math.max(since, cycleStartedAt - 5 * 60_000);
+    if (recovered > 0) {
+      log.warn('proactive', 'history-gap-recovered', { recovered });
+      reportMetric('proactive_history_recovered', recovered);
+      this.deps.onGapDetected?.(recovered);
+    }
+    return recovered;
   }
 
   async handleCardAction(
@@ -126,6 +196,15 @@ export class ProactiveController {
   async runDueReminders(): Promise<void> {
     const run = this.reminderQueue.then(() => this.runDueRemindersOnce());
     this.reminderQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async runTick(): Promise<void> {
+    const run = this.tickQueue.then(async () => {
+      await this.runReconciliation();
+      await this.runDueReminders();
+    });
+    this.tickQueue = run.catch(() => undefined);
     return run;
   }
 
@@ -239,6 +318,24 @@ export class ProactiveController {
       target.followUpId,
       target.reason,
     );
+  }
+
+  private observeRecovered(message: ObserverMessage): Promise<void> {
+    return this.observe({
+      messageId: message.messageId,
+      chatId: message.chatId,
+      chatType: 'group',
+      senderId: message.senderId,
+      ...(message.senderName ? { senderName: message.senderName } : {}),
+      content: message.text,
+      rawContentType: 'text',
+      resources: [],
+      mentions: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: message.createTime,
+      ...(message.threadId ? { threadId: message.threadId } : {}),
+    });
   }
 
   private applyAction(

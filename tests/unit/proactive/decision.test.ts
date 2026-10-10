@@ -70,6 +70,7 @@ describe('Jev decision provider', () => {
     });
     expect(JSON.stringify(requests[0]?.body)).toContain('不可信数据');
     expect(JSON.stringify(requests[0]?.body)).toContain('possible-complex-task');
+    expect(JSON.stringify(requests[0]?.body)).toContain('标记完成');
   });
 });
 

@@ -70,6 +70,7 @@ import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import { ProactiveController } from '../proactive/controller';
 import { JevDecisionProvider } from '../proactive/decision';
+import { createLarkProactiveHistorySource } from '../proactive/history';
 import { isProactiveObserverGloballyDisabled } from '../proactive/kill-switch';
 import { ProactiveStore } from '../proactive/store';
 import type { DecisionProvider } from '../proactive/types';
@@ -272,6 +273,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     // 8s handshake timeout (replaces hardcoded 15s). Fast-fail + fast-retry
     // beats slow-fail in unstable networks.
     handshakeTimeoutMs: 8_000,
+    // Total connect budget. @larksuite/channel 0.7.x closes the pending
+    // client when this expires, preventing a poisoned handshake from leaking
+    // into the next attempt.
+    connectTimeoutMs: 15_000,
     // Per-request REST timeout — without a cap a slow API can hang the
     // event-handling thread.
     httpTimeoutMs: 30_000,
@@ -295,6 +300,18 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           channel,
           store: new ProactiveStore(deps.appPaths.proactiveObserverFile),
           decisionProvider: deps.proactiveDecisionProvider ?? new JevDecisionProvider(),
+          historySource: createLarkProactiveHistorySource(channel),
+          // Reconciliation proves the push stream missed at least one event.
+          // Restart after the recovery cycle has persisted the message; the
+          // durable history path prevents the restart itself from losing it.
+          onGapDetected: (recovered) => {
+            log.warn('proactive', 'ws-gap-detected', { recovered });
+            setTimeout(() => {
+              void controls.restart().catch((err) =>
+                log.fail('proactive', err, { step: 'restart-after-history-gap' }),
+              );
+            }, 0).unref?.();
+          },
         });
         await proactiveObserver.load();
       } catch (err) {
