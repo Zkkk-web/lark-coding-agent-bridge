@@ -12,6 +12,7 @@ export type FollowUpStatus = 'pending' | 'completed' | 'cancelled';
 export interface ObserverMessage {
   messageId: string;
   chatId: string;
+  threadId?: string;
   senderId: string;
   senderName?: string;
   text: string;
@@ -21,6 +22,8 @@ export interface ObserverMessage {
 export interface FollowUp {
   id: string;
   chatId: string;
+  /** Feishu topic/thread that owns this follow-up, when present. */
+  threadId?: string;
   sourceMessageId: string;
   summary: string;
   ownerId: string;

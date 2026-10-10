@@ -98,9 +98,11 @@ describe('proactive observer intake boundary', () => {
           messageId: 'om_non_mention',
           content: '明天把实习复盘发群里',
           mentionedBot: false,
+          threadId: 'omt_validation_topic',
         }),
       );
       await waitFor(() => provider.calls.length === 1);
+      expect(provider.calls[0]?.message.threadId).toBe('omt_validation_topic');
       expect(h.agent.runOptions).toHaveLength(0);
       const proactiveLogs = consoleLog.mock.calls.flat().map(String).join('\n');
       expect(proactiveLogs).toContain('[proactive-message-redacted]');
@@ -430,6 +432,7 @@ function message(input: {
   rawSenderType?: string;
   mentions?: Array<{ key: string; openId?: string; name?: string; isBot?: boolean }>;
   mentionedBot?: boolean;
+  threadId?: string;
 }): NormalizedMessage {
   return {
     messageId: input.messageId,
@@ -448,6 +451,7 @@ function message(input: {
     mentionAll: false,
     mentionedBot: input.mentionedBot ?? true,
     createTime: 1760000001000,
+    ...(input.threadId ? { threadId: input.threadId } : {}),
     ...(input.rawSenderType
       ? {
           raw: {

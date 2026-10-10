@@ -67,6 +67,62 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
+  it('keeps topic follow-ups scoped to their own thread', async () => {
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.99 },
+        { action: 'create', confidence: 0.99 },
+        { action: 'complete', confidence: 0.99 },
+      ],
+      now,
+    );
+
+    harness.controller.enqueue(
+      message('m-topic-a', 'oc_intern', '今天完成 A 方案', false, now, 'omt_topic_a'),
+    );
+    harness.controller.enqueue(
+      message('m-topic-b', 'oc_intern', '今天完成 B 方案', false, now + 1, 'omt_topic_b'),
+    );
+    harness.controller.enqueue(
+      message('m-topic-a-done', 'oc_intern', 'A 方案已经完成', false, now + 2, 'omt_topic_a'),
+    );
+    await harness.controller.flush();
+
+    expect(harness.provider.calls[2]?.pendingFollowUps).toHaveLength(1);
+    expect(harness.store.snapshot().followUps).toMatchObject([
+      { threadId: 'omt_topic_a', status: 'completed' },
+      { threadId: 'omt_topic_b', status: 'pending' },
+    ]);
+    await harness.controller.stop();
+  });
+
+  it('delivers a topic reminder as a reply inside the source thread', async () => {
+    const now = Date.parse('2026-10-09T12:00:00.000Z');
+    const harness = await createHarness([], now);
+    harness.store.createFollowUp({
+      id: 'fu_topic',
+      chatId: 'oc_intern',
+      threadId: 'omt_topic',
+      sourceMessageId: 'm_topic_source',
+      summary: '话题内测试事项',
+      ownerId: 'ou_user',
+      dueAt: now - 1,
+      status: 'pending',
+      createdAt: now - 10_000,
+      updatedAt: now - 10_000,
+    });
+
+    await harness.controller.runDueReminders();
+
+    expect(harness.channel.sent).toHaveLength(1);
+    expect(harness.channel.sent[0]?.options).toEqual({
+      replyTo: 'm_topic_source',
+      replyInThread: true,
+    });
+    await harness.controller.stop();
+  });
+
   it('keeps medium-confidence decisions in shadow without mutating state', async () => {
     const harness = await createHarness([{ action: 'create', confidence: 0.72 }]);
     harness.controller.enqueue(message('m-shadow', 'oc_intern', '我明天交报告'));
@@ -393,6 +449,7 @@ function message(
   content: string,
   mentionedBot = false,
   createTime = Date.now(),
+  threadId?: string,
 ): NormalizedMessage {
   return {
     messageId,
@@ -407,5 +464,6 @@ function message(
     mentionAll: false,
     mentionedBot,
     createTime,
+    ...(threadId ? { threadId } : {}),
   };
 }

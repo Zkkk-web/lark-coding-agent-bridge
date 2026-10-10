@@ -12,6 +12,7 @@ describe('proactive store', () => {
     first.recordMessage({
       messageId: 'm1',
       chatId: 'oc_intern',
+      threadId: 'omt_topic',
       senderId: 'ou_user',
       text: '明天交报告',
       createTime: 1,
@@ -19,6 +20,7 @@ describe('proactive store', () => {
     first.createFollowUp({
       id: 'fu_1',
       chatId: 'oc_intern',
+      threadId: 'omt_topic',
       sourceMessageId: 'm1',
       summary: '明天交报告',
       ownerId: 'ou_user',
@@ -32,7 +34,9 @@ describe('proactive store', () => {
     const second = new ProactiveStore(path);
     await second.load();
     expect(second.hasProcessed('m1')).toBe(true);
-    expect(second.pendingFollowUps('oc_intern')).toHaveLength(1);
+    expect(second.pendingFollowUps('oc_intern', 'omt_topic')).toHaveLength(1);
+    expect(second.pendingFollowUps('oc_intern')).toHaveLength(0);
+    expect(second.snapshot().messages[0]?.threadId).toBe('omt_topic');
   });
 });
 

@@ -62,15 +62,24 @@ export class ProactiveStore {
     this.persist();
   }
 
-  recentMessages(chatId: string, since: number, limit: number): ObserverMessage[] {
+  recentMessages(
+    chatId: string,
+    since: number,
+    limit: number,
+    threadId?: string,
+  ): ObserverMessage[] {
     return this.state.messages
-      .filter((item) => item.chatId === chatId && item.createTime >= since)
+      .filter(
+        (item) =>
+          item.chatId === chatId && item.threadId === threadId && item.createTime >= since,
+      )
       .slice(-limit);
   }
 
-  pendingFollowUps(chatId: string): FollowUp[] {
+  pendingFollowUps(chatId: string, threadId?: string): FollowUp[] {
     return this.state.followUps.filter(
-      (item) => item.chatId === chatId && item.status === 'pending',
+      (item) =>
+        item.chatId === chatId && item.threadId === threadId && item.status === 'pending',
     );
   }
 
@@ -146,6 +155,7 @@ function validMessage(value: unknown): value is ObserverMessage {
     item &&
       typeof item.messageId === 'string' &&
       typeof item.chatId === 'string' &&
+      (item.threadId === undefined || typeof item.threadId === 'string') &&
       typeof item.senderId === 'string' &&
       typeof item.text === 'string' &&
       typeof item.createTime === 'number',
@@ -163,6 +173,7 @@ function validFollowUp(value: unknown): value is FollowUp {
     item &&
       typeof item.id === 'string' &&
       typeof item.chatId === 'string' &&
+      (item.threadId === undefined || typeof item.threadId === 'string') &&
       typeof item.sourceMessageId === 'string' &&
       typeof item.summary === 'string' &&
       typeof item.dueAt === 'number' &&

@@ -156,9 +156,13 @@ export class ProactiveController {
         continue;
       }
 
-      const result = await this.deps.channel.send(item.chatId, {
-        card: reminderCard(claimed, this.deps.config.timeZone),
-      });
+      const result = await this.deps.channel.send(
+        claimed.chatId,
+        { card: reminderCard(claimed, this.deps.config.timeZone) },
+        claimed.threadId
+          ? { replyTo: claimed.sourceMessageId, replyInThread: true }
+          : undefined,
+      );
       const sentAt = this.now();
       this.deps.store.updateFollowUp(item.id, {
         reminderSentAt: sentAt,
@@ -167,7 +171,11 @@ export class ProactiveController {
       });
       await this.deps.store.flush();
       reportMetric('proactive_reminder_sent', 1, { mode: this.deps.config.mode });
-      log.info('proactive', 'reminder-sent', { followUpId: item.id, chatId: item.chatId });
+      log.info('proactive', 'reminder-sent', {
+        followUpId: item.id,
+        chatId: item.chatId,
+        threaded: Boolean(claimed.threadId),
+      });
     }
   }
 
@@ -180,6 +188,7 @@ export class ProactiveController {
     const message: ObserverMessage = {
       messageId: msg.messageId,
       chatId: msg.chatId,
+      ...(msg.threadId ? { threadId: msg.threadId } : {}),
       senderId: msg.senderId,
       ...(msg.senderName ? { senderName: msg.senderName } : {}),
       text: msg.content.trim(),
@@ -196,10 +205,11 @@ export class ProactiveController {
             msg.chatId,
             now - this.deps.config.contextWindowHours * 60 * 60 * 1_000,
             this.deps.config.contextMessages + 1,
+            msg.threadId,
           )
           .filter((item) => item.messageId !== message.messageId)
           .slice(-this.deps.config.contextMessages),
-        pendingFollowUps: this.deps.store.pendingFollowUps(msg.chatId),
+        pendingFollowUps: this.deps.store.pendingFollowUps(msg.chatId, msg.threadId),
         now,
       });
     } catch (err) {
@@ -246,6 +256,7 @@ export class ProactiveController {
       const created = this.deps.store.createFollowUp({
         id,
         chatId: message.chatId,
+        ...(message.threadId ? { threadId: message.threadId } : {}),
         sourceMessageId: message.messageId,
         summary: summarize(message.text),
         ownerId: message.senderId,
@@ -260,7 +271,10 @@ export class ProactiveController {
     }
 
     if (action === 'complete' || action === 'cancel' || action === 'postpone') {
-      const target = selectTarget(message.text, this.deps.store.pendingFollowUps(message.chatId));
+      const target = selectTarget(
+        message.text,
+        this.deps.store.pendingFollowUps(message.chatId, message.threadId),
+      );
       if (!target) return { applied: false, reason: 'no-unambiguous-target' };
       if (action === 'postpone') {
         const dueAt = parseExplicitDueAt(message.text, now, this.deps.config.timeZone);
