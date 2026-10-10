@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
-import { PROACTIVE_CARD_MARKER, reminderCard } from './cards';
+import { followUpRecordedCard, PROACTIVE_CARD_MARKER, reminderCard } from './cards';
 import { DAY_MS, parseExplicitDueAt } from './due';
 import type { ProactiveHistorySource } from './history';
 import { isProactiveObserverGloballyDisabled } from './kill-switch';
@@ -190,6 +190,10 @@ export class ProactiveController {
     const action = payload.action;
     const item = this.deps.store.getFollowUp(id);
     if (!item || item.chatId !== chatId || item.status !== 'pending') return true;
+    if (item.ownerId !== operatorId) {
+      log.warn('proactive', 'card-denied-owner', { followUpId: id, operatorId });
+      return true;
+    }
 
     const now = this.now();
     if (action === 'complete' || action === 'cancel') {
@@ -324,10 +328,14 @@ export class ProactiveController {
       this.recordDecision(message, result.action, result.confidence, 'ignored');
       return;
     }
-    if (
-      this.deps.config.mode === 'shadow' ||
-      result.confidence < this.deps.config.actionThreshold
-    ) {
+    const requiredConfidence = confidenceThresholdFor(
+      result.action,
+      message,
+      this.deps.store.pendingFollowUps(message.chatId, message.threadId),
+      now,
+      this.deps.config,
+    );
+    if (this.deps.config.mode === 'shadow' || result.confidence < requiredConfidence) {
       this.recordDecision(message, result.action, result.confidence, 'shadow');
       return;
     }
@@ -341,6 +349,49 @@ export class ProactiveController {
       target.followUpId,
       target.reason,
     );
+    if (result.action === 'create' && target.applied && target.followUpId) {
+      await this.sendRecordedReceipt(target.followUpId);
+    }
+  }
+
+  private async sendRecordedReceipt(followUpId: string): Promise<void> {
+    const item = this.deps.store.getFollowUp(followUpId);
+    if (!item || item.status !== 'pending' || item.receiptAttemptedAt !== undefined) return;
+
+    const attemptedAt = this.now();
+    this.deps.store.updateFollowUp(followUpId, {
+      receiptAttemptedAt: attemptedAt,
+      updatedAt: attemptedAt,
+    });
+    await this.deps.store.flush();
+
+    try {
+      const result = await this.deps.channel.send(
+        item.chatId,
+        { card: followUpRecordedCard(item, this.deps.config.timeZone) },
+        {
+          replyTo: item.sourceMessageId,
+          ...(item.threadId ? { replyInThread: true } : {}),
+        },
+      );
+      const sentAt = this.now();
+      this.deps.store.updateFollowUp(followUpId, {
+        receiptSentAt: sentAt,
+        receiptMessageId: result.messageId,
+        updatedAt: sentAt,
+      });
+      await this.deps.store.flush();
+      log.info('proactive', 'follow-up-recorded', {
+        followUpId,
+        chatId: item.chatId,
+        threaded: Boolean(item.threadId),
+      });
+    } catch (err) {
+      log.warn('proactive', 'follow-up-receipt-failed', {
+        followUpId,
+        err: String(err),
+      });
+    }
   }
 
   private observeRecovered(message: ObserverMessage): Promise<void> {
@@ -396,6 +447,9 @@ export class ProactiveController {
         this.deps.store.pendingFollowUps(message.chatId, message.threadId),
       );
       if (!target) return { applied: false, reason: 'no-unambiguous-target' };
+      if (target.ownerId !== message.senderId) {
+        return { applied: false, followUpId: target.id, reason: 'owner-mismatch' };
+      }
       if (action === 'postpone') {
         const dueAt = parseExplicitDueAt(message.text, now, this.deps.config.timeZone);
         if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
@@ -483,4 +537,29 @@ function overlap(a: Set<string>, b: Set<string>): number {
   let count = 0;
   for (const token of a) if (b.has(token)) count++;
   return count;
+}
+
+function confidenceThresholdFor(
+  action: ProactiveAction,
+  message: ObserverMessage,
+  pending: FollowUp[],
+  now: number,
+  config: ProactiveObserverConfig,
+): number {
+  switch (action) {
+    case 'create':
+    case 'clarify':
+    case 'possible-complex-task':
+      return config.lowRiskActionThreshold;
+    case 'postpone':
+      return pending.length === 1 &&
+        pending[0]?.ownerId === message.senderId &&
+        parseExplicitDueAt(message.text, now, config.timeZone) !== undefined
+        ? config.lowRiskActionThreshold
+        : config.actionThreshold;
+    case 'complete':
+    case 'cancel':
+    case 'ignore':
+      return config.actionThreshold;
+  }
 }

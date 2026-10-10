@@ -24,11 +24,24 @@ export function parseExplicitDueAt(
   now: number,
   timeZone = DEFAULT_PROACTIVE_TIME_ZONE,
 ): number | undefined {
+  const relativeMinutes = text.match(/([一二两三四五六七八九十\d]{1,3})\s*分钟后/);
+  if (relativeMinutes?.[1]) {
+    const minutes = parseCount(relativeMinutes[1]);
+    if (minutes !== undefined) return now + minutes * 60 * 1_000;
+  }
+
+  if (/半\s*(?:个)?小时后/.test(text)) return now + 30 * 60 * 1_000;
+  const relativeHours = text.match(/([一二两三四五六七八九十\d]{1,3})\s*(?:个)?小时后/);
+  if (relativeHours?.[1]) {
+    const hours = parseCount(relativeHours[1]);
+    if (hours !== undefined) return now + hours * 60 * 60 * 1_000;
+  }
+
   const today = zonedParts(now, timeZone);
   const clock = parseExplicitClock(text) ?? { hour: 18, minute: 0 };
-  const relative = text.match(/([一二三四五六七八九十\d]{1,3})\s*天后/);
+  const relative = text.match(/([一二两三四五六七八九十\d]{1,3})\s*天后/);
   if (relative?.[1]) {
-    const days = parseDayCount(relative[1]);
+    const days = parseCount(relative[1]);
     if (days !== undefined) return zonedDate(addCalendarDays(today, days), clock, timeZone);
   }
 
@@ -235,7 +248,7 @@ export function formatDueAt(
 
 export { DAY_MS };
 
-function parseDayCount(value: string): number | undefined {
+function parseCount(value: string): number | undefined {
   if (/^\d+$/.test(value)) {
     const parsed = Number(value);
     return parsed >= 1 && parsed <= 99 ? parsed : undefined;
@@ -243,6 +256,7 @@ function parseDayCount(value: string): number | undefined {
   const digits: Record<string, number> = {
     一: 1,
     二: 2,
+    两: 2,
     三: 3,
     四: 4,
     五: 5,

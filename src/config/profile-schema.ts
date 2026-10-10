@@ -40,6 +40,8 @@ export interface ProactiveObserverConfig {
   allowedChats: string[];
   /** Decisions at or above this confidence may mutate follow-up state in active mode. */
   actionThreshold: number;
+  /** Low-risk create/postpone decisions may act at this confidence when deterministic guards pass. */
+  lowRiskActionThreshold: number;
   /** Decisions below this confidence are ignored instead of retained as shadow candidates. */
   shadowThreshold: number;
   contextMessages: number;
@@ -328,12 +330,17 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
     probabilityOr(raw.shadowThreshold, 0.6),
     actionThreshold,
   );
+  const lowRiskActionThreshold = Math.min(
+    Math.max(probabilityOr(raw.lowRiskActionThreshold, shadowThreshold), shadowThreshold),
+    actionThreshold,
+  );
   return {
     enabled: raw.enabled === true,
     mode: raw.mode === 'active' ? 'active' : 'shadow',
     timeZone: validTimeZone(raw.timeZone) ? raw.timeZone : 'Asia/Shanghai',
     allowedChats: stringArray(raw.allowedChats),
     actionThreshold,
+    lowRiskActionThreshold,
     shadowThreshold,
     contextMessages: boundedInteger(raw.contextMessages, 20, 1, 100),
     contextWindowHours: boundedInteger(raw.contextWindowHours, 24, 1, 168),

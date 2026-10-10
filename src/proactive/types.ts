@@ -31,6 +31,10 @@ export interface FollowUp {
   status: FollowUpStatus;
   createdAt: number;
   updatedAt: number;
+  /** Persisted before sending the immediate "recorded" receipt card. */
+  receiptAttemptedAt?: number;
+  receiptSentAt?: number;
+  receiptMessageId?: string;
   /**
    * Persisted before the outbound call. Feishu message creation has no
    * idempotency key, so an attempted reminder is never retried automatically

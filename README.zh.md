@@ -313,6 +313,7 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
     "timeZone": "Asia/Shanghai",
     "allowedChats": ["oc_xxxxxxxxxxxxx"],
     "actionThreshold": 0.85,
+    "lowRiskActionThreshold": 0.6,
     "shadowThreshold": 0.6,
     "contextMessages": 20,
     "contextWindowHours": 24,
@@ -322,6 +323,8 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 ```
 
 建议先用 `shadow` 只记录判断，标注真实群消息并核对精确率后再切到 `active`。状态保存在 profile 目录的 `proactive-observer.json`，文件权限为 `0600`。原有 `access.allowedChats` 仍然必须包含目标群，群内 `@ bot` 的既有路径不受观察器影响。
+
+置信度按风险分层，而不是所有动作共用一个阈值。`create` 和事项所有者发出的 `postpone`，只有在确定性代码识别到明确期限及唯一目标后，才可使用较低的 `lowRiskActionThreshold`；`complete` 和 `cancel` 仍受高风险 `actionThreshold` 约束；用户明确点击卡片按钮时不依赖模型置信度，但仍只允许事项所有者操作。事项创建后会立即在原话题回复“已记录”卡片，让用户能看到并撤销操作。
 
 提醒发送采用“至多一次”策略。飞书消息发送接口不提供幂等键，因此观察器会先把本次发送占位持久化，再调用发送接口。即使飞书已经收到了消息、进程却丢失响应，重启后也不会重复提醒。代价是：如果进程恰好在“占位成功、尚未发送”的极短窗口崩溃，本次提醒会被抑制；把事项延期一次即可重新触发提醒。
 
