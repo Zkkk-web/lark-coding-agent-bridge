@@ -42,6 +42,35 @@ async function harness(options: { active?: boolean; enabled?: boolean; runtime?:
 }
 
 describe('confirmed proactive execution', () => {
+  it.each([
+    '我想要份实习生周报模板，包含本周完成的工作、遇到的问题、下周计划三个部分，每部分给一个填写示例，生成飞书文档。',
+    '给我做个周报模板',
+    'I would like a weekly report template',
+  ])('proposes natural document requests without requiring magic words: %s', async (text) => {
+    const h = await harness();
+    expect(await h.controller.offer(message(text), { action: 'possible-complex-task', confidence: .9, taskKind: 'draft' })).toBe(true);
+    expect(h.task()).toMatchObject({ kind: 'draft', status: 'proposed' });
+    expect(h.run).not.toHaveBeenCalled(); expect(h.publish).not.toHaveBeenCalled();
+  });
+
+  it('recognizes an explicit document request if the judge is unavailable', async () => {
+    const h = await harness();
+    expect(await h.controller.offer(message('我想要份实习生周报模板，生成飞书文档。'), { action: 'ignore', confidence: 0 })).toBe(true);
+    expect(h.task().status).toBe('proposed'); expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it('does not use a task kind attached to a non-task decision as permission to propose', async () => {
+    const h = await harness();
+    await h.controller.offer(message('周报模板挺好看'), { action: 'ignore', confidence: .99, taskKind: 'draft' });
+    expect(h.store.snapshot().tasks).toHaveLength(0);
+  });
+
+  it.each(['不用生成周报模板', '帮我修改生产代码，生成说明文档', '请群发这份文档'])('retains safety exclusions even for a structured task decision: %s', async (text) => {
+    const h = await harness();
+    await h.controller.offer(message(text), { action: 'possible-complex-task', confidence: .99, taskKind: 'draft' });
+    expect(h.store.snapshot().tasks).toHaveLength(0);
+  });
+
   it('only proposes before confirmation and updates one topic card through verified delivery', async () => {
     const h = await harness();
     await h.offer();

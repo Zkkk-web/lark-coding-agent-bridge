@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { JevDecisionProvider } from '../../../src/proactive/decision';
 
 describe('Jev decision provider', () => {
+  it.each(['summary', 'research', 'draft'] as const)('returns the structured %s task kind', async (kind) => {
+    const provider = new JevDecisionProvider('test-key', async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.questions.task_kind).toMatchObject({ type: 'choice' });
+      return new Response(JSON.stringify({ model: 'jev-test', answers: {
+        action: { type: 'choice', choice: 'possible-complex-task', confidence: .9 },
+        task_kind: { type: 'choice', choice: kind, confidence: .9 },
+      }, usage: { input_tokens: 12, output_tokens: 3 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const result = await provider.decide({ message: { messageId: 'm', chatId: 'c', senderId: 'u', text: '我想要份实习生周报模板', createTime: 1 }, recentMessages: [], pendingFollowUps: [], now: 2, executionEnabled: true });
+    expect(result).toMatchObject({ action: 'possible-complex-task', taskKind: kind });
+  });
+
   it('sends a fixed structured question and maps the choice response', async () => {
     const requests: Array<{ url: string; body: unknown }> = [];
     const provider = new JevDecisionProvider('test-key', async (input, init) => {
@@ -13,6 +26,7 @@ describe('Jev decision provider', () => {
         JSON.stringify({
           model: 'jev-test',
           answers: {
+            task_kind: { type: 'choice', choice: 'draft', confidence: .9 },
             action: {
               type: 'choice',
               choice: 'create',

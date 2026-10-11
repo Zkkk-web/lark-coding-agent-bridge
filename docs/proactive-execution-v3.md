@@ -8,6 +8,8 @@ The existing V2 reminder ledger stays separate from the task ledger. A need for 
 
 One worker runs at a time and shares the existing process pool with normal bridge work. Defaults: ten-minute timeout, three proposals per author/day, ten-minute topic cooldown. Identical requests deduplicate for 24 hours. Personal pause and quiet hours apply; paused execution is aborted. All task cards reply within the source topic; progress updates the existing card rather than sending new messages. `我的主动任务` reads the persistent status if card updating failed.
 
+Jev returns both an action and a structured document kind (summary/research/draft/none). A supported task decision can propose a card without requiring fixed phrases such as “请帮我起草”; local intent matching is only a fallback when classification is unavailable/incomplete. Negation and operational-mutation exclusions still apply, and all proposals still require the author's separate confirmation. Explicit requests suppressed by duplicate/open-task/cooldown/quota checks get a topic reply explaining why.
+
 ## State and failure behavior
 
 States: proposed → running → publishing → delivered → accepted. Missing information enters needs_input; supplementation returns to proposed at a new revision. Cancellation and failures are explicit terminal states for that attempt. Revisions preserve the earlier artifact list and draft, and create a new document rather than overwriting the accepted source. A review reminder reuses V2's bounded scheduler and is cancelled on acceptance or revision.

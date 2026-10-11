@@ -1168,7 +1168,7 @@ function feedbackForUnavailableAction(
     return '我还不能确定你希望创建、延期、完成还是取消哪项跟进，请补充事项和时间。';
   }
   if (action === 'possible-complex-task') {
-    return '这看起来需要执行型智能体处理；主动跟进 V2 不会自动执行，请 @我明确发起任务。';
+    return '这条需求暂未进入主动文档任务流程，尚未开始执行。如需交给执行型智能体，请 @我明确发起任务。';
   }
   if ((action === 'complete' || action === 'cancel' || action === 'postpone') && !target) {
     return '我没能确定你指的是哪一项跟进，请带上事项名称再说一次。';

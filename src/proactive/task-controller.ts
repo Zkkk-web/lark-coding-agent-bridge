@@ -59,8 +59,12 @@ export class ProactiveTaskController {
 
   async offer(message: ObserverMessage, result: DecisionResult): Promise<boolean> {
     if (!this.enabled() || !this.deps.config.allowedChats.includes(message.chatId)) return false;
-    const kind = result.taskKind ?? inferTaskKind(message.text);
-    if (!kind || !isTaskCandidate(message.text)) return false;
+    const structuredKind = result.action === 'possible-complex-task' ? result.taskKind : undefined;
+    const kind = structuredKind ?? inferTaskKind(message.text);
+    // The semantic decision is enough to offer a reversible card. Lexical intent
+    // is only a fallback; neither path grants permission to execute the task.
+    if (!kind || isExcludedTask(message.text)) return false;
+    if (!structuredKind && !isTaskCandidate(message.text)) return false;
     if (result.action !== 'possible-complex-task' && !hasExplicitHelpIntent(message.text)) return false;
     if (!this.canAct()) return true;
     const now = this.now();
@@ -293,15 +297,17 @@ export class ProactiveTaskController {
 export function inferTaskKind(text: string): ProactiveTaskKind | undefined {
   if (/调研|竞品|对比|调查|research|compar(?:e|ison)/i.test(text)) return 'research';
   if (/整理|总结|摘要|汇总|summary|summari[sz]e/i.test(text)) return 'summary';
-  if (/起草|初稿|写.{0,12}(?:方案|文档|议程|说明|报告)|draft/i.test(text)) return 'draft';
+  if (/起草|初稿|(?:写|生成|制作|做).{0,12}(?:方案|文档|议程|说明|报告|模板|周报)|(?:想要|需要).{0,20}(?:模板|文档|周报)|draft/i.test(text)) return 'draft';
   return undefined;
 }
 function isTaskCandidate(text: string): boolean {
-  return !/不用|不需要|不要|已(?:经)?(?:整理|完成)|搞定|取消|只是举例/.test(text) &&
-    /需要|还没|尚未|帮我|帮忙|能否|可以.*(?:整理|写|调研)|请|求|need|please|help/i.test(text) &&
-    !/部署|删(?:除|掉)|转账|付款|发给客户|群发|修改.{0,8}(?:代码|数据库|生产)/.test(text);
+  return /想要|需要|还没|尚未|帮我|帮忙|给我|能否|可以.*(?:整理|写|调研)|请|求|need|please|help/i.test(text);
 }
-function hasExplicitHelpIntent(text: string): boolean { return /帮我|帮忙|请.{0,12}(?:整理|起草|调研|对比|写)|需要.{0,12}(?:调研|整理|起草)/.test(text); }
+function isExcludedTask(text: string): boolean {
+  return /不用|不需要|不要|已(?:经)?(?:整理|完成)|搞定|取消|只是举例/.test(text) ||
+    /部署|删(?:除|掉)|转账|付款|发给客户|群发|修改.{0,8}(?:代码|数据库|生产)/.test(text);
+}
+function hasExplicitHelpIntent(text: string): boolean { return /帮我|帮忙|给我|我想要|请.{0,12}(?:整理|起草|调研|对比|写|生成|做)|需要.{0,12}(?:调研|整理|起草|模板|文档|周报)/.test(text); }
 function taskFingerprint(text: string, kind: ProactiveTaskKind): string {
   return createHash('sha256').update(`${kind}:${text.toLowerCase().replace(/[\s\p{P}]/gu, '')}`).digest('hex');
 }

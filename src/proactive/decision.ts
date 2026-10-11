@@ -45,6 +45,8 @@ export class JevDecisionProvider implements DecisionProvider {
           '查看我的跟进/待办选 list；提醒偏好或免打扰设置选 settings。',
           'possible-complex-task 仅表示候选升级，不代表已获得运行 Agent 的授权。',
           'execution_enabled=true 时，优先将需要资料整理、公开调研、起草文档的求助或尚未准备好的材料选为 possible-complex-task；纯提醒承诺仍选 create/clarify。',
+          '按语义判断，不要求“请帮我”等固定措辞；“我想要一份周报模板”“给我做个说明”都是文档起草需求。',
+          'task_kind 只分类当前的文档交付需求：summary 需已有材料，research 需公开检索，draft 为生成新正文/模板；纯提醒、闲聊或需要代码/部署/外发等操作选 none。分类不代表执行授权。',
         ],
         latest_message: {
           messageId: input.message.messageId,
@@ -69,13 +71,22 @@ export class JevDecisionProvider implements DecisionProvider {
       },
       questions: {
         action: choice('最新消息应触发哪种跟进状态变化？', ACTIONS),
+        task_kind: choice('最新消息属于哪种受支持的文档任务？', {
+          summary: '整理、总结或提炼已有材料。',
+          research: '检索公开资料并调研、对比，提供来源。',
+          draft: '起草、写作或生成新的文档正文、模板、方案、报告。',
+          none: '不是文档任务，或超出以上范围。',
+        }),
       },
     });
     const answer = result.answers.action;
+    const action = normalizeAction(answer.choice);
+    const kind = result.answers.task_kind?.choice;
     return {
-      action: normalizeAction(answer.choice),
+      action,
       confidence: clamp(answer.confidence),
       model: result.model,
+      ...(action === 'possible-complex-task' && (kind === 'summary' || kind === 'research' || kind === 'draft') ? { taskKind: kind } : {}),
     };
   }
 }

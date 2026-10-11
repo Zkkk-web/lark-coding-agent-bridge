@@ -41,6 +41,28 @@ class FakeDecisionProvider implements DecisionProvider {
 }
 
 describe('proactive follow-up controller', () => {
+  it('routes a semantic document request to a confirmation card instead of legacy escalation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-v3-natural-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    const fake = createFakeChannel(); const run = vi.fn(); const publish = vi.fn();
+    const controller = new ProactiveController({
+      config: { ...ACTIVE_CONFIG, execution: { enabled: true, maxRuntimeMs: 30000, dailyProposalLimit: 3, proposalCooldownMinutes: 0 } },
+      store, channel: { send: fake.send, updateCard: async () => {} } as never,
+      decisionProvider: { decide: async () => ({ action: 'possible-complex-task', confidence: .99, taskKind: 'draft' }) },
+      taskRuntime: { run, publish },
+    });
+    await controller.load();
+    controller.enqueue(message('natural-source', 'oc_intern', '我想要份实习生周报模板，包含本周完成的工作、遇到的问题、下周计划三个部分，每部分给一个填写示例，生成飞书文档。', false, Date.now(), 'topic'));
+    await controller.flush();
+    expect(store.snapshot().tasks).toMatchObject([{ status: 'proposed', kind: 'draft', threadId: 'topic' }]);
+    expect(store.snapshot().decisions.at(-1)).toMatchObject({ outcome: 'applied', reason: 'task-proposal' });
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0]!.content).toHaveProperty('card');
+    expect(fake.sent[0]!.options).toEqual({ replyTo: 'natural-source', replyInThread: true });
+    expect(run).not.toHaveBeenCalled(); expect(publish).not.toHaveBeenCalled();
+    await controller.stop();
+  });
+
   it('does not reconnect over a task started by a recovered confirmation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'proactive-v3-gap-'));
     const store = new ProactiveStore(join(dir, 'state.json'));
