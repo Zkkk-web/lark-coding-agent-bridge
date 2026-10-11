@@ -60,7 +60,8 @@ export class ProactiveController {
       this.isEnabled() &&
       msg.chatType !== 'p2p' &&
       !msg.mentionedBot &&
-      msg.rawContentType === 'text' &&
+      (msg.rawContentType === 'text' || msg.rawContentType === 'post') &&
+      msg.content.trim() !== '' &&
       this.allowedChats.has(msg.chatId)
     );
   }
@@ -326,18 +327,35 @@ export class ProactiveController {
       return;
     }
 
-    if (result.confidence < this.deps.config.shadowThreshold || result.action === 'ignore') {
+    const pendingFollowUps = this.deps.store.pendingFollowUps(
+      message.chatId,
+      message.threadId,
+    );
+    const deterministicOverride = hasDeterministicLowRiskEvidence(
+      result.action,
+      message,
+      pendingFollowUps,
+      now,
+      this.deps.config,
+    );
+    if (
+      (result.confidence < this.deps.config.shadowThreshold && !deterministicOverride) ||
+      result.action === 'ignore'
+    ) {
       this.recordDecision(message, result.action, result.confidence, 'ignored');
       return;
     }
     const requiredConfidence = confidenceThresholdFor(
       result.action,
       message,
-      this.deps.store.pendingFollowUps(message.chatId, message.threadId),
+      pendingFollowUps,
       now,
       this.deps.config,
     );
-    if (this.deps.config.mode === 'shadow' || result.confidence < requiredConfidence) {
+    if (
+      this.deps.config.mode === 'shadow' ||
+      (result.confidence < requiredConfidence && !deterministicOverride)
+    ) {
       this.recordDecision(message, result.action, result.confidence, 'shadow');
       if (this.deps.config.mode === 'active') {
         await this.sendUnappliedFeedback(message, result.action, now, 'action-deferred');
@@ -352,7 +370,10 @@ export class ProactiveController {
       result.confidence,
       target.applied ? 'applied' : 'ignored',
       target.followUpId,
-      target.reason,
+      target.reason ??
+        (deterministicOverride && result.confidence < requiredConfidence
+          ? 'deterministic-low-risk-evidence'
+          : undefined),
     );
     if (result.action === 'create' && target.applied && target.followUpId) {
       await this.sendRecordedReceipt(target.followUpId);
@@ -642,6 +663,47 @@ function confidenceThresholdFor(
     case 'ignore':
       return config.actionThreshold;
   }
+}
+
+/**
+ * A model score is useful for fuzzy intent, but it must not veto a reversible
+ * action whose safety conditions are fully checkable in code. This is kept
+ * deliberately narrow: create needs both a parseable time and explicit
+ * first-person/reminder intent; postpone needs one owned target and a
+ * parseable replacement time. Destructive cancellation never gets an
+ * override.
+ */
+function hasDeterministicLowRiskEvidence(
+  action: ProactiveAction,
+  message: ObserverMessage,
+  pending: FollowUp[],
+  now: number,
+  config: ProactiveObserverConfig,
+): boolean {
+  if (action === 'create') {
+    return (
+      parseExplicitDueAt(message.text, now, config.timeZone) !== undefined &&
+      hasExplicitFollowUpIntent(message.text)
+    );
+  }
+  if (action === 'postpone') {
+    return (
+      pending.length === 1 &&
+      pending[0]?.ownerId === message.senderId &&
+      parsePostponeDueAt(message.text, now, config.timeZone) !== undefined
+    );
+  }
+  return false;
+}
+
+function hasExplicitFollowUpIntent(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '');
+  if (/(?:提醒我|通知我|叫我|帮我(?:记得)?提醒|请.{0,24}提醒我)/.test(normalized)) {
+    return true;
+  }
+  return /(?:我|我们).{0,48}(?:完成|提交|交付|反馈|跟进|确认|处理|发送|回复|联系|更新|验收|开会|复盘|打电话)/.test(
+    normalized,
+  );
 }
 
 function feedbackForUnavailableAction(
