@@ -16,6 +16,7 @@ import {
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
+import { respondToCardAction } from '../card/feedback';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
@@ -421,8 +422,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        await handleCardAction({
+      return respondToCardAction(() => withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+        log.info('cardAction', 'received', { tag: evt.action.tag, operator: evt.operator.openId.slice(-6) });
+        return handleCardAction({
           channel,
           evt,
           sessions,
@@ -439,7 +441,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
           proactiveObserver,
         });
-      }).catch((err) => log.fail('cardAction', err));
+      }), (err) => log.fail('cardAction', err, { chatId: evt.chatId, msgId: evt.messageId }));
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {

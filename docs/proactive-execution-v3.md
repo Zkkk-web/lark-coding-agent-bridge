@@ -18,6 +18,8 @@ State schema 3 adds tasks without removing V1/V2 reminders, preferences or messa
 
 Task-card edits are safe to retry, but initial card creation is not automatically retried after an ambiguous send result. Persistence failures block action. There is currently no cross-process distributed worker lease: run one observer process per profile.
 
+Task button callbacks return a toast for accepted actions, stale/foreign cards, paused execution, busy workers and already-changed states. The channel propagates the response back to Feishu; if processing takes over 1.5 seconds it returns only a receipt (not an execution-success claim) while the original operation continues. Subsequent progress and failures remain on the same card. Normalized callback arrival and task binding denials/outcomes are logged without request text or credentials. An absent arrival log is not proof a user did not click: failures before normalization/platform delivery still need client/platform evidence. This does not bypass author, revision, chat or card binding.
+
 ## Execution and privacy
 
 This implementation supports Codex only, using a fresh private working directory and read-only sandbox. User config, project rules/instructions, shell, apps, hooks, skills, memory and multi-agent behavior are disabled for task runs. Feishu credentials and bridge-bound environment variables are not inherited; the general bridge prompt granting coding capabilities is not used. Normal `@bot` execution is unchanged.
@@ -32,11 +34,12 @@ The host—not the model—performs the fixed publication sequence: create a new
 
 - No model run or document creation before confirmation.
 - Wrong owner/chat/topic/card/revision cannot approve; duplicate approvals start once.
+- Native button click → callback receipt → original card progress → readable document is a separate acceptance test from text confirmation. Do not claim the former based on the latter alone.
 - Missing inputs are visible and revised requirements require reconfirmation.
 - Start → progress → real readable document → revision → acceptance, all in the existing topic.
 - Cancellation, timeout, restart, permission/readback failures remain visibly non-delivered.
 - Research returns checkable source links; summary uses actual supplied source content.
-- Shadow/off sends and executes nothing; V2 reminder and normal mention tests remain green.
+- Shadow/off sends no proactive messages and executes nothing; clicking an old task card can return a warning toast. V2 reminder and normal mention tests remain green.
 - Migration retains reminders and task records through restart.
 
 Rollout: back up configuration, observer state and startup script; verify the built artifact hash; opt in only the existing test chat; use the existing test topic without creating a new top-level group message. Verify running process/version, disk config and real user-visible document access. Rollback first disables `execution.enabled` and restarts after active tasks stop. Keep version-3 state; downgrading to V2 without a saved snapshot can discard task history.

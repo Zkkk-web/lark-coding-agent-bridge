@@ -77,7 +77,8 @@ describe('confirmed proactive execution', () => {
     expect(h.run).not.toHaveBeenCalled();
     expect(h.task().status).toBe('proposed');
     expect(h.channel.send).toHaveBeenCalledWith('chat', expect.anything(), { replyTo: 'source', replyInThread: true });
-    await h.click('start'); await h.controller.waitForIdle();
+    expect(await h.click('start')).toMatchObject({ toast: { type: 'success', content: '已开始整理，请查看原卡片进度。' } });
+    await h.controller.waitForIdle();
     expect(h.run).toHaveBeenCalledTimes(1);
     expect(h.task()).toMatchObject({ status: 'delivered', confirmedBy: 'owner', documentId: 'doc123', artifacts: [{ revision: 1 }] });
     expect(h.channel.send).toHaveBeenCalledTimes(1);
@@ -86,7 +87,7 @@ describe('confirmed proactive execution', () => {
 
   it.each(['owner', 'chat', 'card', 'revision'])('rejects mismatched %s and repeated confirmations', async (bad) => {
     const h = await harness(); await h.offer();
-    await h.click('start', bad === 'revision' ? { revision: 0 } : {}, bad === 'owner' ? 'other' : 'owner', bad === 'chat' ? 'other' : 'chat', bad === 'card' ? 'other' : 'card');
+    expect(await h.click('start', bad === 'revision' ? { revision: 0 } : {}, bad === 'owner' ? 'other' : 'owner', bad === 'chat' ? 'other' : 'chat', bad === 'card' ? 'other' : 'card')).toMatchObject({ toast: { type: 'warning' } });
     expect(h.run).not.toHaveBeenCalled();
     await Promise.all([h.click('start'), h.click('start'), h.click('start')]);
     await h.controller.waitForIdle(); expect(h.run).toHaveBeenCalledTimes(1);
@@ -95,6 +96,23 @@ describe('confirmed proactive execution', () => {
   it.each([{ active: false }, { enabled: false }])('does not send or execute when disabled/shadow', async (mode) => {
     const h = await harness(mode); await h.offer();
     expect(h.channel.send).not.toHaveBeenCalled(); expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['shadow', 'disabled', 'paused', 'removed-chat'])('explains a blocked click after a proposal: %s', async (reason) => {
+    const h = await harness(); await h.offer();
+    if (reason === 'shadow') h.setActive(false);
+    if (reason === 'disabled') h.cfg.execution!.enabled = false;
+    if (reason === 'paused') h.store.updatePreferences('owner', { enabled: false });
+    if (reason === 'removed-chat') h.cfg.allowedChats = [];
+    expect(await h.click('start')).toMatchObject({ toast: { type: 'warning' } });
+    expect(h.task().status).toBe('proposed'); expect(h.run).not.toHaveBeenCalled();
+    expect(h.channel.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('explains a repeated start after delivery without republishing', async () => {
+    const h = await harness(); await h.offer(); await h.click('start'); await h.controller.waitForIdle();
+    expect(await h.click('start')).toMatchObject({ toast: { type: 'info', content: expect.stringContaining('没有重复执行') } });
+    expect(h.run).toHaveBeenCalledTimes(1); expect(h.publish).toHaveBeenCalledTimes(1);
   });
 
   it('rejects other chats, ordinary chatter, negations and operational mutations', async () => {

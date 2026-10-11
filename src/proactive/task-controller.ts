@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { LarkChannel } from '@larksuite/channel';
+import type { CardActionResponse, LarkChannel } from '@larksuite/channel';
+import { cardFeedback } from '../card/feedback';
 import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log } from '../core/logger';
 import { DAY_MS } from './due';
@@ -105,17 +106,24 @@ export class ProactiveTaskController {
     return true;
   }
 
-  async handleCard(payload: Record<string, unknown>, chatId: string, operatorId: string, messageId: string): Promise<boolean> {
+  async handleCard(payload: Record<string, unknown>, chatId: string, operatorId: string, messageId: string): Promise<false | CardActionResponse> {
     if (!(TASK_CARD_MARKER in payload)) return false;
-    await this.mutate(async () => {
-      if (!this.canAct()) return;
+    return this.mutate(async () => {
+      const deny = (reason: string, content: string): CardActionResponse => {
+        log.warn('proactive-task', 'card-denied', { reason, messageId });
+        return cardFeedback(content, 'warning');
+      };
+      if (!this.canAct()) return deny('disabled', '主动执行当前已暂停，未启动任务。');
       const task = this.deps.store.getTask(String(payload.taskId ?? ''));
-      if (!task || task.chatId !== chatId || task.ownerId !== operatorId ||
-          task.cardMessageId !== messageId || task.revision !== payload.revision ||
-          !this.deps.config.allowedChats.includes(chatId)) return;
-      await this.act(task, String(payload.action));
+      if (!task || task.chatId !== chatId || task.cardMessageId !== messageId ||
+          !this.deps.config.allowedChats.includes(chatId)) return deny('binding', '这张卡片已失效或不在允许范围内，请查看原话题的最新卡片。');
+      if (task.ownerId !== operatorId) return deny('owner', '只有这条需求的发起人可以操作。');
+      if (task.revision !== payload.revision) return deny('revision', '要求已更新，请使用最新版本的卡片重新确认。');
+      const before = task.status;
+      const result = await this.act(task, String(payload.action));
+      log.info('proactive-task', 'card-handled', { taskId: task.id, revision: task.revision, before, after: task.status });
+      return result;
     });
-    return true;
   }
 
   async handleMessage(message: ObserverMessage): Promise<boolean> {
@@ -153,14 +161,14 @@ export class ProactiveTaskController {
         });
         await this.deps.store.flush();
         await this.render(task);
-      } else await this.act(task, command.action);
+      } else { await this.act(task, command.action); }
     });
     return true;
   }
 
-  private async act(task: ProactiveTask, action: string): Promise<void> {
+  private async act(task: ProactiveTask, action: string): Promise<CardActionResponse> {
     const prefs = this.deps.store.preferencesFor(task.ownerId);
-    if (action !== 'cancel' && !prefs.enabled) return;
+    if (action !== 'cancel' && !prefs.enabled) return cardFeedback('你已暂停主动助手，请恢复后再操作。', 'warning');
     if (action === 'cancel' && !['accepted', 'cancelled', 'delivered'].includes(task.status)) {
       this.deps.store.updateTask(task.id, { status: 'cancelled', progress: '任务已停止。', question: undefined, error: undefined, updatedAt: this.now() });
       this.workers.get(task.id)?.abort.abort();
@@ -186,8 +194,8 @@ export class ProactiveTaskController {
       }
     } else if ((action === 'start' && task.status === 'proposed') ||
                (action === 'retry' && task.status === 'failed' && !task.publicationAttemptedAt)) {
-      if (this.workers.has(task.id)) return;
-      if (this.workers.size >= 1) { await this.render(task, '已有主动任务在执行，请稍后点击开始。'); return; }
+      if (this.workers.has(task.id)) return cardFeedback('任务正在执行，不会重复启动。');
+      if (this.workers.size >= 1) { await this.render(task, '已有主动任务在执行，请稍后点击开始。'); return cardFeedback('已有主动任务在执行，请稍后点击开始。', 'warning'); }
       this.deps.store.updateTask(task.id, { status: 'running', confirmedAt: this.now(), confirmedBy: task.ownerId,
         progress: '正在读取已确认的材料。', question: undefined, error: undefined, updatedAt: this.now() });
       // Durable claim BEFORE any model or external publication. Duplicate clicks see running.
@@ -198,10 +206,11 @@ export class ProactiveTaskController {
         log.warn('proactive-task', 'state-persist-failed', { taskId: task.id });
       }).finally(() => this.workers.delete(task.id));
       this.workers.set(task.id, { abort, done });
-      return;
-    } else return;
+      return cardFeedback('已开始整理，请查看原卡片进度。', 'success');
+    } else return cardFeedback('任务状态已变化，本次没有重复执行。请查看原卡片。');
     await this.deps.store.flush();
     await this.render(task);
+    return cardFeedback('操作已完成，请查看原卡片。', 'success');
   }
 
   private async execute(task: ProactiveTask, abort: AbortController): Promise<void> {
@@ -284,9 +293,9 @@ export class ProactiveTaskController {
   private reply(message: ObserverMessage, text: string): Promise<unknown> {
     return this.deps.channel.send(message.chatId, { text }, { replyTo: message.messageId, replyInThread: true });
   }
-  private mutate(fn: () => Promise<void>): Promise<void> {
+  private mutate<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(fn);
-    this.queue = run.catch(() => undefined);
+    this.queue = run.then(() => undefined, () => undefined);
     return run;
   }
   async flush(): Promise<void> { await this.queue; await Promise.all(this.cardQueues.values()); await this.deps.store.flush(); }

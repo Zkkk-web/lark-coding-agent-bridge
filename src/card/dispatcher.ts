@@ -1,4 +1,6 @@
-import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type { CardActionEvent, CardActionResponse, LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import { cardFeedback } from './feedback';
+import { TASK_CARD_MARKER } from '../proactive/task-cards';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
@@ -41,10 +43,10 @@ export interface CardDispatchDeps {
   callbackAuth?: CallbackAuth;
   callbackPolicyFingerprint?: string;
   callbackPolicyFingerprintForScope?: (scope: string) => string | undefined;
-  proactiveObserver?: ProactiveController;
+  proactiveObserver?: Pick<ProactiveController, 'handleCardAction'>;
 }
 
-export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
+export async function handleCardAction(deps: CardDispatchDeps): Promise<void | CardActionResponse> {
   const value = deps.evt.action.value;
   if (!value || typeof value !== 'object') return;
   const payload = value as Record<string, unknown>;
@@ -76,20 +78,19 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       operator: operatorId.slice(-6),
       reason: accessDecision.reason,
     });
-    return;
+    return cardFeedback('当前账号或会话没有此操作的权限。', 'warning');
   }
 
-  if (
-    deps.proactiveObserver &&
-    (await deps.proactiveObserver.handleCardAction(
+  if (deps.proactiveObserver) {
+    const result = await deps.proactiveObserver.handleCardAction(
       payload,
       chatId,
       operatorId,
       deps.evt.messageId,
-    ))
-  ) {
-    return;
+    );
+    if (result) return typeof result === 'object' ? result : undefined;
   }
+  if (TASK_CARD_MARKER in payload) return cardFeedback('主动执行当前不可用，未启动任务。', 'warning');
 
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info('cardAction', 'skip-legacy-callback-marker', { scope });

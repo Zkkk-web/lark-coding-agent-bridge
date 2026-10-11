@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type { CardActionResponse, LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import { cardFeedback } from '../card/feedback';
+import { TASK_CARD_MARKER } from './task-cards';
 import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
 import {
@@ -222,8 +224,10 @@ export class ProactiveController {
     chatId: string,
     operatorId: string,
     messageId: string,
-  ): Promise<boolean> {
-    if (await this.tasks?.handleCard(payload, chatId, operatorId, messageId)) return true;
+  ): Promise<boolean | CardActionResponse> {
+    const taskResult = await this.tasks?.handleCard(payload, chatId, operatorId, messageId);
+    if (taskResult) return taskResult;
+    if (TASK_CARD_MARKER in payload) return cardFeedback('主动执行当前不可用，未启动任务。', 'warning');
     if (!(PROACTIVE_CARD_MARKER in payload)) return false;
     // Consume our own marker while disabled/Shadow, but leave the ledger
     // untouched. Historical cards therefore cannot bypass a rollback.

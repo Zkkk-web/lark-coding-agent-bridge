@@ -1,4 +1,4 @@
-import type { NormalizedMessage } from '@larksuite/channel';
+import type { CardActionEvent, CardActionResponse, NormalizedMessage } from '@larksuite/channel';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -33,6 +33,7 @@ import { startChannel } from '../../../src/bot/channel.js';
 
 interface MessageHandlerMap {
   message?: (msg: NormalizedMessage) => Promise<void> | void;
+  cardAction?: (evt: CardActionEvent) => Promise<void | CardActionResponse>;
 }
 
 interface FakeLarkChannel {
@@ -86,6 +87,17 @@ describe('bot identity injection into the agent adapter', () => {
 });
 
 describe('proactive observer intake boundary', () => {
+  it('propagates a card receipt through the registered channel handler', async () => {
+    const h = await createHarness();
+    await startTestBridge(h);
+    const receipt = await h.channel.handlers.cardAction?.({
+      messageId: 'om_task_card', chatId: 'oc_chat', operator: { openId: 'ou_user' },
+      action: { tag: 'button', value: { __proactive_task: true, action: 'start' } },
+    });
+    expect(receipt).toMatchObject({ toast: { type: 'warning', content: '主动执行当前不可用，未启动任务。' } });
+    expect(h.agent.runOptions).toHaveLength(0);
+  });
+
   it('routes allowlisted non-mentions only to the judge while mentions keep the agent path', async () => {
     const h = await createHarness({ proactive: true });
     const provider = new RecordingDecisionProvider();
