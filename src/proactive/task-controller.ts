@@ -343,15 +343,17 @@ export class ProactiveTaskController {
     return next;
   }
 
-  private refreshOverview(message: ObserverMessage, page?: number, requested = false): Promise<void> {
+  refreshOverview(message: ObserverMessage, page?: number, requested = false): Promise<void> {
     const next = this.dashboardQueue.then(async () => {
       if (!this.canAct()) return;
       let dashboard = this.deps.store.taskDashboard(message.chatId, message.senderId, message.threadId);
       if (!dashboard && !requested) return;
       const tasks = this.deps.store.tasksFor(message.chatId, message.senderId, message.threadId);
-      const currentPage = Math.min(Math.max(1, page ?? dashboard?.page ?? 1), Math.max(1, Math.ceil(tasks.length / 3)));
+      const collaboration = this.deps.store.snapshot().followUps.filter(i => i.condition &&
+        i.chatId === message.chatId && i.threadId === message.threadId && (i.ownerId === message.senderId || i.createdById === message.senderId));
+      const currentPage = Math.min(Math.max(1, page ?? dashboard?.page ?? 1), Math.max(1, Math.ceil((tasks.length + collaboration.length) / 3)));
       const card = taskOverviewCard(tasks, currentPage, this.now(), this.deps.config.timeZone,
-        !this.deps.store.preferencesFor(message.senderId).enabled);
+        !this.deps.store.preferencesFor(message.senderId).enabled, collaboration);
       try {
         if (dashboard?.messageId) {
           await this.deps.channel.updateCard(dashboard.messageId, card);
@@ -369,7 +371,7 @@ export class ProactiveTaskController {
         await this.deps.store.flush();
       } catch {
         log.warn('proactive-task', 'overview-sync-failed', { chatId: message.chatId });
-        if (requested) await this.reply(message, `总览卡同步未确认；为避免重复刷屏，未新建卡片。当前台账：\n${tasks.slice(-3).map(t => `${t.id} · ${TASK_STATUS_LABELS[t.status]}\n${taskNextStep(t)}`).join('\n') || '本话题暂无你的主动任务。'}\n请联系维护者核对原卡。`);
+        if (requested) await this.reply(message, `总览卡同步未确认；为避免重复刷屏，未新建卡片。当前台账：\n${tasks.slice(-3).map(t => `${t.id} · ${TASK_STATUS_LABELS[t.status]}\n${taskNextStep(t)}`).join('\n') || '本话题暂无你的文档任务。'}${collaboration.length ? '\n另有协作事项，请回复“我的协作跟进”查看。' : ''}\n请联系维护者核对原卡。`);
       }
     });
     this.dashboardQueue = next.catch(() => undefined);

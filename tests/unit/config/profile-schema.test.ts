@@ -80,6 +80,7 @@ describe('profile schema', () => {
     expect(defaults.proactiveObserver.lowRiskActionThreshold).toBe(0.6);
     expect(defaults.proactiveObserver.pollIntervalMs).toBe(15_000);
     expect(defaults.proactiveObserver.execution?.enabled).toBe(false);
+    expect(defaults.proactiveObserver.conditionalFollowUps).toBe(false);
 
     const configured = normalizeProfileConfig({
       schemaVersion: 2,

@@ -1,4 +1,5 @@
-import type { ProactiveTask } from './types';
+import type { FollowUp, ProactiveTask } from './types';
+import { conditionalNextStep, conditionalStage } from './conditional-intent';
 
 export const TASK_CARD_MARKER = '__proactive_task';
 export const TASK_STATUS_LABELS = {
@@ -85,8 +86,8 @@ export function taskNextStep(task: ProactiveTask): string {
 }
 
 /** Read-only, owner/topic scoped, three entries per page to keep the card compact. */
-export function taskOverviewCard(tasks: ProactiveTask[], page: number, now: number, timeZone: string, paused: boolean): object {
-  const ordered = [...tasks].sort((a, b) => Number(['accepted', 'cancelled'].includes(a.status)) - Number(['accepted', 'cancelled'].includes(b.status)) || b.updatedAt - a.updatedAt);
+export function taskOverviewCard(tasks: ProactiveTask[], page: number, now: number, timeZone: string, paused: boolean, collaboration: FollowUp[] = []): object {
+  const ordered = [...tasks, ...collaboration].sort((a, b) => Number(['accepted', 'completed', 'cancelled'].includes(a.status)) - Number(['accepted', 'completed', 'cancelled'].includes(b.status)) || b.updatedAt - a.updatedAt);
   const pages = Math.max(1, Math.ceil(ordered.length / 3));
   const current = Math.min(Math.max(1, page), pages);
   const entries = ordered.slice((current - 1) * 3, current * 3);
@@ -96,8 +97,10 @@ export function taskOverviewCard(tasks: ProactiveTask[], page: number, now: numb
     schema: '2.0', config: { update_multi: true, width_mode: 'default', enable_forward: false },
     header: { title: { tag: 'plain_text', content: '我的主动任务' }, subtitle: { tag: 'plain_text', content: `本话题 · 第 ${current}/${pages} 页 · ${new Intl.DateTimeFormat('zh-CN', { timeZone, hour: '2-digit', minute: '2-digit' }).format(now)} 更新` }, template: 'blue' },
     body: { direction: 'vertical', padding: '12px', vertical_spacing: '12px', elements: [
-      block(`**${paused ? '已暂停自动执行' : '任务状态与下一步'}**\n仅展示你在本话题发起的任务。${tasks.length ? '' : '目前没有任务；提出文档需求后，助手会先请你确认。'}`, 'blue-50'),
-      ...entries.map(task => block(`**${TASK_STATUS_LABELS[task.status]} · ${escapeCardText(task.id)}**\n${escapeCardText(task.request.slice(0, 100))}\n${escapeCardText((task.question ?? task.error ?? task.progress ?? '').slice(0, 180))}\n${task.cardSyncError ? '原任务卡同步失败，以此处状态为准。\n' : ''}${escapeCardText(taskNextStep(task))}\n[查看原话题](${taskSourceUrl(task)})${task.documentUrl && ['delivered', 'accepted'].includes(task.status) ? ` · [打开成果](${task.documentUrl})` : ''}`)),
+      block(`**${paused ? '已暂停自动执行' : '任务状态与下一步'}**\n展示你在本话题发起的任务，以及你发起或负责的协作跟进。${ordered.length ? '' : '目前没有任务；提出文档需求后，助手会先请你确认。'}`, 'blue-50'),
+      ...entries.map(task => 'kind' in task
+        ? block(`**${TASK_STATUS_LABELS[task.status]} · ${escapeCardText(task.id)}**\n${escapeCardText(task.request.slice(0, 100))}\n${escapeCardText((task.question ?? task.error ?? task.progress ?? '').slice(0, 180))}\n${task.cardSyncError ? '原任务卡同步失败，以此处状态为准。\n' : ''}${escapeCardText(taskNextStep(task))}\n[查看原话题](${taskSourceUrl(task)})${task.documentUrl && ['delivered', 'accepted'].includes(task.status) ? ` · [打开成果](${task.documentUrl})` : ''}`)
+        : block(`**协作跟进 · ${conditionalStage(task)} · ${escapeCardText(task.id)}**\n${escapeCardText(task.summary.slice(0, 160))}\n${escapeCardText(conditionalNextStep(task))}${task.condition?.cardSyncError ? '\n原卡同步失败，以台账为准。' : ''}\n[查看原话题](${taskSourceUrl(task)})`)),
       text(`回复“我的主动任务”刷新本卡。${pages > 1 ? ` 翻页：我的主动任务 第${current < pages ? current + 1 : 1}页。` : ''}\n若需求未列出，请提供原消息时间以核查接收情况；列表缺失不等于确定没收到。`),
     ] },
   };

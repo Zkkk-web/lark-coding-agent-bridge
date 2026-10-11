@@ -7,6 +7,7 @@ const MAX_PAGES = 4;
 interface ApiMessageItem {
   message_id?: string;
   thread_id?: string;
+  parent_id?: string;
   msg_type?: string;
   create_time?: string;
   chat_id?: string;
@@ -159,6 +160,7 @@ function normalizeItem(
     messageId: item.message_id,
     chatId: item.chat_id ?? fallbackChatId,
     ...(item.thread_id ? { threadId: item.thread_id } : {}),
+    ...(item.parent_id ? { replyToMessageId: item.parent_id } : {}),
     senderId: item.sender.id,
     ...(item.sender.sender_name ? { senderName: item.sender.sender_name } : {}),
     ...(mentions.length > 0 ? { mentions } : {}),

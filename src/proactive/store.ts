@@ -123,6 +123,7 @@ export class ProactiveStore {
     return this.state.followUps.filter(
       (item) =>
         item.status === 'pending' &&
+        !item.condition &&
         item.dueAt !== undefined &&
         (item.nextReminderAt ?? item.dueAt) <= now &&
         item.reminderAttemptedAt === undefined,
@@ -315,7 +316,8 @@ function validFollowUp(value: unknown): value is FollowUp {
         item.status === 'pending' ||
         item.status === 'completed' ||
         item.status === 'cancelled') &&
-      (item.status === 'proposed' || typeof item.dueAt === 'number'),
+      (item.condition === undefined || validCondition(item.condition)) &&
+      (item.status === 'proposed' || typeof item.dueAt === 'number' || validCondition(item.condition)),
   );
 }
 
@@ -327,10 +329,18 @@ function migrateFollowUp(item: FollowUp): FollowUp {
     createdById: item.createdById ?? item.ownerId,
     reminderHistory,
     overdueReminderCount: item.overdueReminderCount ?? Math.max(0, reminderHistory.length - 1),
-    ...(item.status === 'pending' && item.dueAt !== undefined && item.nextReminderAt === undefined
+    ...(item.status === 'pending' && !item.condition && item.dueAt !== undefined && item.nextReminderAt === undefined
       ? { nextReminderAt: item.reminderSentAt === undefined ? item.dueAt : undefined }
       : {}),
   };
+}
+
+function validCondition(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const c = value as NonNullable<FollowUp['condition']>;
+  return typeof c.prerequisite === 'string' && c.prerequisite.length > 0 &&
+    typeof c.nextAction === 'string' && c.nextAction.length > 0 &&
+    (c.satisfiedAt === undefined || (Number.isFinite(c.satisfiedAt) && typeof c.satisfiedBy === 'string'));
 }
 
 function validPreferences(value: unknown): value is ProactiveUserPreferences {

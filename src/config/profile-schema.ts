@@ -55,6 +55,8 @@ export interface ProactiveObserverConfig {
   overdueReminderMaxCount: number;
   /** Default per-user daily scheduled reminder limit. */
   defaultDailyReminderLimit: number;
+  /** Opt-in human-owned prerequisite → feedback tracking; never executes tools. */
+  conditionalFollowUps?: boolean;
   /** Separate opt-in; V1/V2 installations never begin agent execution on upgrade. */
   execution?: {
     enabled: boolean;
@@ -369,6 +371,7 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
     ),
     overdueReminderMaxCount: boundedInteger(raw.overdueReminderMaxCount, 2, 0, 20),
     defaultDailyReminderLimit: boundedInteger(raw.defaultDailyReminderLimit, 5, 1, 100),
+    conditionalFollowUps: raw.conditionalFollowUps === true,
     execution: {
       enabled: raw.execution?.enabled === true,
       maxRuntimeMs: boundedInteger(raw.execution?.maxRuntimeMs, 10 * 60_000, 30_000, 30 * 60_000),

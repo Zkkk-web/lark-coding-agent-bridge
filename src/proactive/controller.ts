@@ -16,6 +16,7 @@ import type { ProactiveHistorySource } from './history';
 import { isProactiveObserverGloballyDisabled } from './kill-switch';
 import { ProactiveStore } from './store';
 import { ProactiveTaskController, type TaskRuntime } from './task-controller';
+import { ConditionalFollowUps } from './conditional-followups';
 import {
   localDayBounds,
   nextAllowedByQuietHours,
@@ -65,11 +66,21 @@ export class ProactiveController {
   private recoverySince: number | undefined;
   private lastReconciliationAt = 0;
   readonly tasks?: ProactiveTaskController;
+  private readonly conditional: ConditionalFollowUps;
 
   constructor(private readonly deps: ProactiveControllerDeps) {
     this.allowedChats = new Set(deps.config.allowedChats);
     this.now = deps.now ?? Date.now;
     this.globallyDisabled = deps.globallyDisabled ?? isProactiveObserverGloballyDisabled;
+    this.conditional = new ConditionalFollowUps({
+      ...deps, now: this.now, canAct: () => this.canAct(), resolveThread: deps.resolveTaskThread,
+      onChanged: async (item) => {
+        for (const senderId of new Set([item.ownerId, item.createdById ?? item.ownerId])) {
+          await this.tasks?.refreshOverview({ messageId: item.sourceMessageId, chatId: item.chatId,
+            threadId: item.threadId, senderId, text: '', createTime: this.now() });
+        }
+      },
+    });
     if (deps.taskRuntime && deps.channel.updateCard) {
       this.tasks = new ProactiveTaskController({
         config: deps.config, store: deps.store,
@@ -127,6 +138,7 @@ export class ProactiveController {
     await this.reminderQueue;
     await this.tickQueue;
     await this.tasks?.flush();
+    await this.conditional.flush();
     await this.deps.store.flush();
   }
 
@@ -225,6 +237,8 @@ export class ProactiveController {
     operatorId: string,
     messageId: string,
   ): Promise<boolean | CardActionResponse> {
+    const conditionalResult = await this.conditional.handleCard(payload, chatId, operatorId, messageId);
+    if (conditionalResult) return conditionalResult;
     const taskResult = await this.tasks?.handleCard(payload, chatId, operatorId, messageId);
     if (taskResult) return taskResult;
     if (TASK_CARD_MARKER in payload) return cardFeedback('主动执行当前不可用，未启动任务。', 'warning');
@@ -239,6 +253,7 @@ export class ProactiveController {
     const id = typeof payload.followUpId === 'string' ? payload.followUpId : '';
     const action = payload.action;
     const item = this.deps.store.getFollowUp(id);
+    if (item?.condition) return cardFeedback('请使用协作跟进卡片，不可用定时提醒按钮操作。', 'warning');
     if (
       !item ||
       item.chatId !== chatId ||
@@ -453,6 +468,7 @@ export class ProactiveController {
       messageId: msg.messageId,
       chatId: msg.chatId,
       ...(msg.threadId ? { threadId: msg.threadId } : {}),
+      ...(msg.replyToMessageId ? { replyToMessageId: msg.replyToMessageId } : {}),
       senderId: msg.senderId,
       ...(msg.senderName ? { senderName: msg.senderName } : {}),
       mentions: msg.mentions
@@ -467,6 +483,11 @@ export class ProactiveController {
     };
     this.deps.store.recordMessage(message);
     const now = this.now();
+
+    if (await this.conditional.handleMessage(message)) {
+      this.recordDecision(message, 'clarify', 1, this.canAct() ? 'applied' : 'shadow', undefined, 'conditional-control');
+      return;
+    }
 
     if (await this.tasks?.handleMessage(message)) {
       this.recordDecision(message, 'possible-complex-task', 1, this.canAct() ? 'applied' : 'shadow', undefined, 'task-command');
@@ -528,6 +549,11 @@ export class ProactiveController {
         executionEnabled: this.tasks?.enabled() ?? false,
       });
     } catch (err) {
+      const conditional = await this.conditional.offer(message);
+      if (conditional) {
+        this.recordDecision(message, 'clarify', 0, conditional.outcome, conditional.targetFollowUpId, conditional.reason);
+        return;
+      }
       if (await this.tasks?.offer(message, { action: 'ignore', confidence: 0 })) {
         this.recordDecision(message, 'possible-complex-task', 0, this.canAct() ? 'applied' : 'shadow', undefined, 'explicit-task-fallback');
         return;
@@ -537,6 +563,11 @@ export class ProactiveController {
       return;
     }
 
+    const conditional = await this.conditional.offer(message);
+    if (conditional) {
+      this.recordDecision(message, 'clarify', result.confidence, conditional.outcome, conditional.targetFollowUpId, conditional.reason);
+      return;
+    }
     if (await this.tasks?.offer(message, result)) {
       this.recordDecision(message, 'possible-complex-task', result.confidence, this.canAct() ? 'applied' : 'shadow', undefined, 'task-proposal');
       return;
@@ -735,7 +766,8 @@ export class ProactiveController {
 
   private async sendDashboard(message: ObserverMessage): Promise<void> {
     const now = this.now();
-    const items = this.deps.store.userFollowUps(message.senderId);
+    const items = this.deps.store.userFollowUps(message.senderId).filter(i =>
+      !i.condition || (i.chatId === message.chatId && i.threadId === message.threadId));
     const completedSince = now - 7 * DAY_MS;
     const day = localDayBounds(now, this.deps.config.timeZone);
     const dueSoonEnd = Math.max(
@@ -753,6 +785,8 @@ export class ProactiveController {
           (item) => item.status === 'pending' && item.dueAt !== undefined && item.dueAt < now,
         ),
       },
+      { title: '等待前置事项', items: items.filter(i => i.condition && i.status === 'pending' && i.condition.satisfiedAt === undefined) },
+      { title: '待后续反馈', items: items.filter(i => i.condition && i.status === 'pending' && i.condition.satisfiedAt !== undefined) },
       {
         title: '今天到期',
         items: items.filter(
@@ -897,6 +931,7 @@ export class ProactiveController {
       mentionedBot: false,
       createTime: message.createTime,
       ...(message.threadId ? { threadId: message.threadId } : {}),
+      ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
     });
   }
 
@@ -951,6 +986,7 @@ export class ProactiveController {
         this.deps.store.openFollowUps(message.chatId, message.threadId),
       );
       if (!target) return { applied: false, reason: 'no-unambiguous-target' };
+      if (target.condition) return { applied: false, followUpId: target.id, reason: 'conditional-control-required' };
       if (target.ownerId !== message.senderId) {
         return { applied: false, followUpId: target.id, reason: 'owner-mismatch' };
       }

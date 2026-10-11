@@ -2,6 +2,8 @@
 
 Tracking: upstream #323. Builds on V3 (#321 / #322); V3's source scope, document-only execution, owner authorization and default-off configuration remain unchanged. No autonomous task execution, new permissions, global group rollout or process-pool queue is introduced.
 
+V3.2 adds a separately opted-in [conditional collaboration follow-up](proactive-collaboration-v32.md) path and includes related items in the task overview. Its human-owned state does not authorize document execution.
+
 ## User-visible contract
 
 | In the original topic | Result |

@@ -20,6 +20,7 @@ export interface ObserverMessage {
   messageId: string;
   chatId: string;
   threadId?: string;
+  replyToMessageId?: string;
   senderId: string;
   senderName?: string;
   mentions?: ObserverMention[];
@@ -63,6 +64,21 @@ export interface FollowUp {
   nextReminderAt?: number;
   confirmedAt?: number;
   resolutionMessageId?: string;
+  /** Human-owned event dependency, not a scheduled execution or a deadline. */
+  condition?: FollowUpCondition;
+}
+
+export interface FollowUpCondition {
+  prerequisite: string;
+  nextAction: string;
+  ownerName?: string;
+  requesterName?: string;
+  contextMessageId?: string;
+  contextText?: string;
+  satisfiedAt?: number;
+  satisfiedBy?: string;
+  evidenceMessageId?: string;
+  cardSyncError?: boolean;
 }
 
 export interface QuietHours {
