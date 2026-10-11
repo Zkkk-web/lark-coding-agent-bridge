@@ -304,6 +304,35 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
+  it('uses explicit postpone syntax when Jev misclassifies the message as create', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'clarify', confidence: 0.31 },
+        { action: 'create', confidence: 0.55 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(
+      message('m-proposed', 'oc_intern', '这个方案后面跟一下', false, now, 'omt_v2'),
+    );
+    harness.controller.enqueue(
+      message('m-misclassified-postpone', 'oc_intern', '这个方案改到 1 分钟后提醒', false, now + 1, 'omt_v2'),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]).toMatchObject({
+      status: 'pending',
+      dueAt: now + 60_000,
+    });
+    expect(harness.store.snapshot().decisions.at(-1)).toMatchObject({
+      action: 'postpone',
+      confidence: 0.55,
+      outcome: 'applied',
+    });
+    await harness.controller.stop();
+  });
+
   it('never treats a repeated commitment as postponement without an explicit adjustment phrase', async () => {
     const now = Date.parse('2026-10-11T03:52:00.000Z');
     const harness = await createHarness(

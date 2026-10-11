@@ -513,6 +513,15 @@ export class ProactiveController {
       message.chatId,
       message.threadId,
     );
+    const deterministicTarget = selectTarget(message.text, pendingFollowUps);
+    if (
+      result.action !== 'postpone' &&
+      deterministicTarget?.ownerId === message.senderId &&
+      hasExplicitPostponeIntent(message.text) &&
+      parsePostponeDueAt(message.text, now, this.deps.config.timeZone) !== undefined
+    ) {
+      result = { ...result, action: 'postpone' };
+    }
     const deterministicOverride = hasDeterministicLowRiskEvidence(
       result.action,
       message,
