@@ -316,8 +316,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           // Restart after the recovery cycle has persisted the message; the
           // durable history path prevents the restart itself from losing it.
           onGapDetected: (recovered) => {
+            if (activeRuns.snapshot().length > 0 || proactiveObserver?.tasks?.hasActiveWork()) {
+              log.info('proactive', 'ws-restart-deferred-active-run', { recovered });
+              return;
+            }
             log.warn('proactive', 'ws-gap-detected', { recovered });
             setTimeout(() => {
+              if (activeRuns.snapshot().length > 0 || proactiveObserver?.tasks?.hasActiveWork()) return;
               void controls.restart().catch((err) =>
                 log.fail('proactive', err, { step: 'restart-after-history-gap' }),
               );

@@ -207,7 +207,12 @@ export class ProactiveController {
     if (recovered > 0) {
       log.warn('proactive', 'history-gap-recovered', { recovered });
       reportMetric('proactive_history_recovered', recovered);
-      this.deps.onGapDetected?.(recovered);
+      // A recovered confirmation may have just started a task. Reconnecting
+      // would stop that worker and a second observer would misclassify it as
+      // interrupted. History reconciliation remains available until idle.
+      if (!this.deps.store.snapshot().tasks.some((task) => task.status === 'running' || task.status === 'publishing')) {
+        this.deps.onGapDetected?.(recovered);
+      }
     }
     return recovered;
   }

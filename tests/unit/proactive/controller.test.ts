@@ -41,6 +41,24 @@ class FakeDecisionProvider implements DecisionProvider {
 }
 
 describe('proactive follow-up controller', () => {
+  it('does not reconnect over a task started by a recovered confirmation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-v3-gap-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    const fake = createFakeChannel(); const gap = vi.fn();
+    let command = '';
+    const now = Date.now();
+    const controller = new ProactiveController({ config: { ...ACTIVE_CONFIG, execution: { enabled: true, maxRuntimeMs: 30000, dailyProposalLimit: 3, proposalCooldownMinutes: 0 } },
+      store, channel: { send: fake.send, updateCard: async () => {} } as never, now: () => now,
+      decisionProvider: { decide: async () => ({ action: 'possible-complex-task', confidence: .9 }) }, onGapDetected: gap,
+      historySource: { listChatRoots: async () => [], listThread: async () => [{ messageId: 'recovered-start', chatId: 'oc_intern', threadId: 'topic', senderId: 'ou_user', text: command, createTime: now }] },
+      taskRuntime: { run: async (_t, signal) => new Promise((resolve) => signal.addEventListener('abort', () => resolve({ status: 'needs_input', question: 'stopped' }), { once: true })),
+        publish: async () => { throw new Error('unexpected'); } } });
+    await controller.load(); controller.enqueue(message('proposal', 'oc_intern', '请帮我起草验收方案', false, now, 'topic')); await controller.flush();
+    command = `开始 ${store.snapshot().tasks[0]!.id}`;
+    expect(await controller.runReconciliation()).toBe(1);
+    expect(controller.tasks!.hasActiveWork()).toBe(true); expect(gap).not.toHaveBeenCalled();
+    await controller.stop();
+  });
   it('routes an explicit document request through the V3 confirmation path even if Jev is unavailable', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'proactive-v3-routing-'));
     const store = new ProactiveStore(join(dir, 'state.json'));

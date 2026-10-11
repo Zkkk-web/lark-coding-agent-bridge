@@ -37,6 +37,7 @@ export class ProactiveTaskController {
   constructor(private readonly deps: TaskControllerDeps) { this.now = deps.now ?? Date.now; }
 
   enabled(): boolean { return this.deps.config.execution?.enabled === true; }
+  hasActiveWork(): boolean { return this.workers.size > 0 || this.deps.store.snapshot().tasks.some((task) => task.status === 'running' || task.status === 'publishing'); }
   private canAct(): boolean { return this.enabled() && this.deps.canAct(); }
 
   async recover(): Promise<void> {
