@@ -300,6 +300,34 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
+  it('never treats a repeated commitment as postponement without an explicit adjustment phrase', async () => {
+    const now = Date.parse('2026-10-11T03:52:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.9 },
+        { action: 'postpone', confidence: 0.99 },
+      ],
+      now,
+    );
+    const text = '我需要在 3 分钟后完成主动式智能体验收';
+    harness.controller.enqueue(
+      message('m-repeat-source', 'oc_intern', text, false, now, 'omt_acceptance'),
+    );
+    harness.controller.enqueue(
+      message('m-repeat-copy', 'oc_intern', text, false, now + 1, 'omt_acceptance'),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps).toHaveLength(1);
+    expect(harness.store.snapshot().followUps[0]?.dueAt).toBe(now + 3 * 60_000);
+    expect(harness.store.snapshot().decisions.at(-1)).toMatchObject({
+      action: 'postpone',
+      outcome: 'ignored',
+      reason: 'missing-explicit-postpone-intent',
+    });
+    await harness.controller.stop();
+  });
+
   it('explains a recognized action that cannot be safely executed instead of staying silent', async () => {
     const now = Date.parse('2026-10-09T02:00:00.000Z');
     const harness = await createHarness(

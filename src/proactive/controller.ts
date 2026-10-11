@@ -549,6 +549,13 @@ export class ProactiveController {
         return { applied: false, followUpId: target.id, reason: 'owner-mismatch' };
       }
       if (action === 'postpone') {
+        if (!hasExplicitPostponeIntent(message.text)) {
+          return {
+            applied: false,
+            followUpId: target.id,
+            reason: 'missing-explicit-postpone-intent',
+          };
+        }
         const dueAt = parsePostponeDueAt(message.text, now, this.deps.config.timeZone);
         if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
         this.deps.store.updateFollowUp(target.id, {
@@ -652,6 +659,7 @@ function confidenceThresholdFor(
     case 'postpone':
       return pending.length === 1 &&
         pending[0]?.ownerId === message.senderId &&
+        hasExplicitPostponeIntent(message.text) &&
         parsePostponeDueAt(message.text, now, config.timeZone) !== undefined
         ? config.lowRiskActionThreshold
         : config.actionThreshold;
@@ -690,6 +698,7 @@ function hasDeterministicLowRiskEvidence(
     return (
       pending.length === 1 &&
       pending[0]?.ownerId === message.senderId &&
+      hasExplicitPostponeIntent(message.text) &&
       parsePostponeDueAt(message.text, now, config.timeZone) !== undefined
     );
   }
@@ -702,6 +711,13 @@ function hasExplicitFollowUpIntent(text: string): boolean {
     return true;
   }
   return /(?:我|我们).{0,48}(?:完成|提交|交付|反馈|跟进|确认|处理|发送|回复|联系|更新|验收|开会|复盘|打电话)/.test(
+    normalized,
+  );
+}
+
+function hasExplicitPostponeIntent(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '');
+  return /(?:改到|改成|调整到|延期|延后|推迟|往后|再提醒|提醒时间.{0,8}(?:改|调整))/.test(
     normalized,
   );
 }
@@ -720,6 +736,9 @@ function feedbackForUnavailableAction(
       : '我识别到你想设置跟进，但缺少明确时间。可以说“3 分钟后提醒我”或“明天下午 3 点前完成”。';
   }
   if (reason === 'owner-mismatch') return '这项跟进只能由创建它的人修改。';
+  if (reason === 'missing-explicit-postpone-intent') {
+    return '我没有看到明确的延期指令。如需调整，请说“改到 5 分钟后”或“延期到明天下午 3 点”。';
+  }
   if (reason === 'no-unambiguous-target') {
     return '我没能确定你指的是哪一项跟进，请带上事项名称再说一次。';
   }
