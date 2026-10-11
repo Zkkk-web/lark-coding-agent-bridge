@@ -3,7 +3,7 @@ import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
 import { followUpRecordedCard, PROACTIVE_CARD_MARKER, reminderCard } from './cards';
-import { DAY_MS, parseExplicitDueAt } from './due';
+import { DAY_MS, formatDueAt, parseExplicitDueAt, parsePostponeDueAt } from './due';
 import type { ProactiveHistorySource } from './history';
 import { isProactiveObserverGloballyDisabled } from './kill-switch';
 import { ProactiveStore } from './store';
@@ -196,14 +196,15 @@ export class ProactiveController {
     }
 
     const now = this.now();
+    let updated: FollowUp | undefined;
     if (action === 'complete' || action === 'cancel') {
-      this.deps.store.updateFollowUp(id, {
+      updated = this.deps.store.updateFollowUp(id, {
         status: action === 'complete' ? 'completed' : 'cancelled',
         updatedAt: now,
         resolutionMessageId: messageId,
       });
     } else if (action === 'postpone') {
-      this.deps.store.updateFollowUp(id, {
+      updated = this.deps.store.updateFollowUp(id, {
         dueAt: now + DAY_MS,
         updatedAt: now,
         reminderAttemptedAt: undefined,
@@ -215,6 +216,7 @@ export class ProactiveController {
       return true;
     }
     await this.deps.store.flush();
+    if (updated) await this.sendActionConfirmation(updated, action, messageId);
     log.info('proactive', 'card-applied', { action, followUpId: id, operatorId });
     reportMetric('proactive_action', 1, { action: String(action) });
     return true;
@@ -337,6 +339,9 @@ export class ProactiveController {
     );
     if (this.deps.config.mode === 'shadow' || result.confidence < requiredConfidence) {
       this.recordDecision(message, result.action, result.confidence, 'shadow');
+      if (this.deps.config.mode === 'active') {
+        await this.sendUnappliedFeedback(message, result.action, now, 'action-deferred');
+      }
       return;
     }
 
@@ -351,6 +356,78 @@ export class ProactiveController {
     );
     if (result.action === 'create' && target.applied && target.followUpId) {
       await this.sendRecordedReceipt(target.followUpId);
+    } else if (target.applied && target.followUpId) {
+      const item = this.deps.store.getFollowUp(target.followUpId);
+      if (item) await this.sendActionConfirmation(item, result.action, message.messageId);
+    } else {
+      await this.sendUnappliedFeedback(
+        message,
+        result.action,
+        now,
+        'action-unapplied',
+        target.reason,
+      );
+    }
+  }
+
+  private async sendActionConfirmation(
+    item: FollowUp,
+    action: ProactiveAction,
+    replyTo: string,
+  ): Promise<void> {
+    let text: string | undefined;
+    if (action === 'complete') text = `✅ 已完成：${item.summary}`;
+    else if (action === 'cancel') text = `🚫 已取消跟进：${item.summary}`;
+    else if (action === 'postpone') {
+      text = `⏰ 已延期至 ${formatDueAt(item.dueAt, this.deps.config.timeZone)}：${item.summary}`;
+    }
+    if (text) await this.sendTextReply(item.chatId, item.threadId, replyTo, text, 'action-confirmed');
+  }
+
+  private async sendUnappliedFeedback(
+    message: ObserverMessage,
+    action: ProactiveAction,
+    now: number,
+    event: string,
+    reason?: string,
+  ): Promise<void> {
+    const pending = this.deps.store.pendingFollowUps(message.chatId, message.threadId);
+    const target = selectTarget(message.text, pending);
+    const text = feedbackForUnavailableAction(
+      action,
+      message,
+      target,
+      reason,
+      now,
+      this.deps.config.timeZone,
+    );
+    if (text) {
+      await this.sendTextReply(
+        message.chatId,
+        message.threadId,
+        message.messageId,
+        text,
+        event,
+      );
+    }
+  }
+
+  private async sendTextReply(
+    chatId: string,
+    threadId: string | undefined,
+    replyTo: string,
+    text: string,
+    event: string,
+  ): Promise<void> {
+    try {
+      await this.deps.channel.send(
+        chatId,
+        { text },
+        { replyTo, ...(threadId ? { replyInThread: true } : {}) },
+      );
+      log.info('proactive', event, { chatId, threaded: Boolean(threadId) });
+    } catch (err) {
+      log.warn('proactive', `${event}-failed`, { chatId, err: String(err) });
     }
   }
 
@@ -451,7 +528,7 @@ export class ProactiveController {
         return { applied: false, followUpId: target.id, reason: 'owner-mismatch' };
       }
       if (action === 'postpone') {
-        const dueAt = parseExplicitDueAt(message.text, now, this.deps.config.timeZone);
+        const dueAt = parsePostponeDueAt(message.text, now, this.deps.config.timeZone);
         if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
         this.deps.store.updateFollowUp(target.id, {
           dueAt,
@@ -554,12 +631,65 @@ function confidenceThresholdFor(
     case 'postpone':
       return pending.length === 1 &&
         pending[0]?.ownerId === message.senderId &&
-        parseExplicitDueAt(message.text, now, config.timeZone) !== undefined
+        parsePostponeDueAt(message.text, now, config.timeZone) !== undefined
         ? config.lowRiskActionThreshold
         : config.actionThreshold;
     case 'complete':
+      return pending.length === 1 && pending[0]?.ownerId === message.senderId
+        ? config.lowRiskActionThreshold
+        : config.actionThreshold;
     case 'cancel':
     case 'ignore':
       return config.actionThreshold;
   }
+}
+
+function feedbackForUnavailableAction(
+  action: ProactiveAction,
+  message: ObserverMessage,
+  target: FollowUp | undefined,
+  reason: string | undefined,
+  now: number,
+  timeZone: string,
+): string | undefined {
+  if (reason === 'missing-explicit-due') {
+    return action === 'postpone'
+      ? '我识别到你想延期，但没读到明确的新时间。可以说“5 分钟后提醒我”或“延期到明天下午 3 点”。'
+      : '我识别到你想设置跟进，但缺少明确时间。可以说“3 分钟后提醒我”或“明天下午 3 点前完成”。';
+  }
+  if (reason === 'owner-mismatch') return '这项跟进只能由创建它的人修改。';
+  if (reason === 'no-unambiguous-target') {
+    return '我没能确定你指的是哪一项跟进，请带上事项名称再说一次。';
+  }
+  if (action === 'clarify') {
+    return '我还不能确定你希望创建、延期、完成还是取消哪项跟进，请补充事项和时间。';
+  }
+  if (action === 'possible-complex-task') {
+    return '这看起来需要执行型智能体处理；主动跟进 V1 不会自动执行，请 @我明确发起任务。';
+  }
+  if ((action === 'complete' || action === 'cancel' || action === 'postpone') && !target) {
+    return '我没能确定你指的是哪一项跟进，请带上事项名称再说一次。';
+  }
+  if (target && target.ownerId !== message.senderId) {
+    return '这项跟进只能由创建它的人修改。';
+  }
+  if (
+    action === 'postpone' &&
+    parsePostponeDueAt(message.text, now, timeZone) === undefined
+  ) {
+    return '我识别到你想延期，但没读到明确的新时间。可以说“5 分钟后提醒我”或“延期到明天下午 3 点”。';
+  }
+  if (action === 'cancel') {
+    return '我识别到你想取消这项跟进。为避免误取消，请点击事项卡片里的“取消跟进”。';
+  }
+  if (action === 'complete') {
+    return '我还不够确定这项是否已经完成。请说“确认完成”或点击事项卡片里的“已完成”。';
+  }
+  if (action === 'postpone') {
+    return '我还不够确定新的提醒时间。请说“5 分钟后提醒我”或“延期到明天下午 3 点”。';
+  }
+  if (action === 'create') {
+    return '我还不够确定是否要创建跟进。请明确说“请在具体时间提醒我”。';
+  }
+  return undefined;
 }

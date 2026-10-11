@@ -169,7 +169,7 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
-  it('keeps medium-confidence completion behind the high-risk threshold', async () => {
+  it('allows medium-confidence completion for the sole owner-authored follow-up and confirms it', async () => {
     const now = Date.parse('2026-10-09T02:00:00.000Z');
     const harness = await createHarness(
       [
@@ -178,14 +178,28 @@ describe('proactive follow-up controller', () => {
       ],
       now,
     );
-    harness.controller.enqueue(message('m-open', 'oc_intern', '今天完成招聘周报', false, now));
     harness.controller.enqueue(
-      message('m-maybe-done', 'oc_intern', '招聘周报好像搞定了', false, now + 1),
+      message('m-open', 'oc_intern', '今天完成招聘周报', false, now, 'omt_acceptance'),
+    );
+    harness.controller.enqueue(
+      message(
+        'm-maybe-done',
+        'oc_intern',
+        '招聘周报好像搞定了',
+        false,
+        now + 1,
+        'omt_acceptance',
+      ),
     );
     await harness.controller.flush();
 
-    expect(harness.store.snapshot().followUps[0]?.status).toBe('pending');
-    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('shadow');
+    expect(harness.store.snapshot().followUps[0]?.status).toBe('completed');
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('applied');
+    expect(harness.channel.sent).toHaveLength(2);
+    expect(harness.channel.sent[1]).toMatchObject({
+      content: { text: expect.stringContaining('✅ 已完成') },
+      options: { replyTo: 'm-maybe-done', replyInThread: true },
+    });
     await harness.controller.stop();
   });
 
@@ -198,17 +212,72 @@ describe('proactive follow-up controller', () => {
       ],
       now,
     );
-    harness.controller.enqueue(message('m-plan', 'oc_intern', '今天完成招聘周报', false, now));
     harness.controller.enqueue(
-      message('m-postpone', 'oc_intern', '招聘周报延期到后天', false, now + 1),
+      message('m-plan', 'oc_intern', '今天完成招聘周报', false, now, 'omt_acceptance'),
+    );
+    harness.controller.enqueue(
+      message('m-postpone', 'oc_intern', '改到 5 分钟吧', false, now + 1, 'omt_acceptance'),
     );
     await harness.controller.flush();
 
     expect(harness.store.snapshot().followUps[0]).toMatchObject({
       status: 'pending',
-      dueAt: Date.parse('2026-10-11T10:00:00.000Z'),
+      dueAt: now + 5 * 60_000,
     });
     expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('applied');
+    expect(harness.channel.sent).toHaveLength(2);
+    expect(harness.channel.sent[1]).toMatchObject({
+      content: { text: expect.stringContaining('⏰ 已延期至') },
+      options: { replyTo: 'm-postpone', replyInThread: true },
+    });
+    await harness.controller.stop();
+  });
+
+  it('explains a recognized action that cannot be safely executed instead of staying silent', async () => {
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.94 },
+        { action: 'postpone', confidence: 0.72 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(message('m-plan', 'oc_intern', '今天完成招聘周报', false, now));
+    harness.controller.enqueue(
+      message('m-vague-postpone', 'oc_intern', '招聘周报晚点再说', false, now + 1),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]?.dueAt).not.toBeUndefined();
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('shadow');
+    expect(harness.channel.sent).toHaveLength(2);
+    expect(harness.channel.sent[1]).toMatchObject({
+      content: { text: expect.stringContaining('没读到明确的新时间') },
+      options: { replyTo: 'm-vague-postpone' },
+    });
+    await harness.controller.stop();
+  });
+
+  it('keeps medium-confidence cancellation behind explicit confirmation and tells the owner how', async () => {
+    const now = Date.parse('2026-10-09T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.94 },
+        { action: 'cancel', confidence: 0.72 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(message('m-owned-plan', 'oc_intern', '今天完成招聘周报', false, now));
+    harness.controller.enqueue(message('m-cancel-maybe', 'oc_intern', '这个不用了', false, now + 1));
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]?.status).toBe('pending');
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('shadow');
+    expect(harness.channel.sent).toHaveLength(2);
+    expect(harness.channel.sent[1]).toMatchObject({
+      content: { text: expect.stringContaining('取消跟进') },
+      options: { replyTo: 'm-cancel-maybe' },
+    });
     await harness.controller.stop();
   });
 
@@ -296,6 +365,38 @@ describe('proactive follow-up controller', () => {
       now: () => now,
     });
     await shadow.runDueReminders();
+    expect(harness.channel.sent).toHaveLength(0);
+    await shadow.stop();
+    await harness.controller.stop();
+  });
+
+  it('keeps recognized actions silent and side-effect free in shadow mode', async () => {
+    const now = Date.parse('2026-10-09T12:00:00.000Z');
+    const harness = await createHarness([{ action: 'postpone', confidence: 0.72 }], now);
+    harness.store.createFollowUp({
+      id: 'fu_shadow_action',
+      chatId: 'oc_intern',
+      sourceMessageId: 'm_shadow_action_source',
+      summary: 'Shadow 延期测试',
+      ownerId: 'ou_user',
+      dueAt: now + 60_000,
+      status: 'pending',
+      createdAt: now - 10_000,
+      updatedAt: now - 10_000,
+    });
+    const shadow = new ProactiveController({
+      config: { ...ACTIVE_CONFIG, mode: 'shadow' },
+      channel: harness.channel as never,
+      store: harness.store,
+      decisionProvider: harness.provider,
+      now: () => now,
+    });
+
+    shadow.enqueue(message('m-shadow-postpone', 'oc_intern', '改到 5 分钟吧', false, now));
+    await shadow.flush();
+
+    expect(harness.store.getFollowUp('fu_shadow_action')?.dueAt).toBe(now + 60_000);
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('shadow');
     expect(harness.channel.sent).toHaveLength(0);
     await shadow.stop();
     await harness.controller.stop();
@@ -535,6 +636,10 @@ describe('proactive follow-up controller', () => {
       'om_card',
     );
     expect(harness.store.getFollowUp(item.id)?.status).toBe('completed');
+    expect(harness.channel.sent).toHaveLength(2);
+    expect(harness.channel.sent[1]?.content).toMatchObject({
+      text: expect.stringContaining('✅ 已完成'),
+    });
     await harness.controller.stop();
   });
 
