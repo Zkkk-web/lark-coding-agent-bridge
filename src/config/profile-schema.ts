@@ -55,6 +55,13 @@ export interface ProactiveObserverConfig {
   overdueReminderMaxCount: number;
   /** Default per-user daily scheduled reminder limit. */
   defaultDailyReminderLimit: number;
+  /** Separate opt-in; V1/V2 installations never begin agent execution on upgrade. */
+  execution?: {
+    enabled: boolean;
+    maxRuntimeMs: number;
+    dailyProposalLimit: number;
+    proposalCooldownMinutes: number;
+  };
 }
 
 export interface SandboxConfig {
@@ -362,6 +369,12 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
     ),
     overdueReminderMaxCount: boundedInteger(raw.overdueReminderMaxCount, 2, 0, 20),
     defaultDailyReminderLimit: boundedInteger(raw.defaultDailyReminderLimit, 5, 1, 100),
+    execution: {
+      enabled: raw.execution?.enabled === true,
+      maxRuntimeMs: boundedInteger(raw.execution?.maxRuntimeMs, 10 * 60_000, 30_000, 30 * 60_000),
+      dailyProposalLimit: boundedInteger(raw.execution?.dailyProposalLimit, 3, 1, 20),
+      proposalCooldownMinutes: boundedInteger(raw.execution?.proposalCooldownMinutes, 10, 0, 1440),
+    },
   };
 }
 

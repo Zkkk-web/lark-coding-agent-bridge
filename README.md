@@ -332,6 +332,12 @@ Confidence is risk-tiered rather than governed by one global cutoff. Reversible 
 
 Each scheduled delivery is deliberately **at most once**. Feishu/Lark message creation does not provide an idempotency key, so the observer persists a delivery claim before sending. A successful delivery may schedule the next bounded overdue chase; an ambiguous transport failure is never retried. Quiet hours, per-user daily limits, pause state, and the overdue-reminder switch are evaluated before every scheduled send.
 
+#### V3: confirmed document execution (off by default)
+
+A Codex profile may opt in with `"execution": { "enabled": true, "maxRuntimeMs": 600000, "dailyProposalLimit": 3, "proposalCooldownMinutes": 10 }` inside `proactiveObserver`. Summary, public research and drafting proposals execute only after their author confirms in Active mode. The default observer behavior above remains unchanged. A fresh read-only Codex run generates content; the host creates a new Feishu/Lark document, grants the requester access and reads the content back before marking it delivered. Progress edits one card in the original topic. No existing-document edits, shell execution, external messaging by the worker or Hermes integration are enabled.
+
+Commands include `开始 pt_<id>`, `补充 pt_<id>：requirements`, `取消任务 pt_<id>`, `验收完成 pt_<id>` and `我的主动任务`. Changes revoke old confirmation. State version 3 migrates V1/V2 ledgers; interrupted work is marked failed, never replayed. Ambiguous publication retains the draft and any known document ID without automatic recreation. See [design, permissions, runtime-policy probe and acceptance](docs/proactive-execution-v3.md) before enabling.
+
 ## Cloud-doc comments
 
 Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.

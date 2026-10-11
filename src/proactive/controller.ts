@@ -13,6 +13,7 @@ import { DAY_MS, formatDueAt, parseExplicitDueAt, parsePostponeDueAt } from './d
 import type { ProactiveHistorySource } from './history';
 import { isProactiveObserverGloballyDisabled } from './kill-switch';
 import { ProactiveStore } from './store';
+import { ProactiveTaskController, type TaskRuntime } from './task-controller';
 import {
   localDayBounds,
   nextAllowedByQuietHours,
@@ -39,7 +40,7 @@ type PreferenceCommand =
 
 export interface ProactiveControllerDeps {
   config: ProactiveObserverConfig;
-  channel: Pick<LarkChannel, 'send'>;
+  channel: Pick<LarkChannel, 'send'> & Partial<Pick<LarkChannel, 'updateCard'>>;
   store: ProactiveStore;
   decisionProvider: DecisionProvider;
   historySource?: ProactiveHistorySource;
@@ -47,6 +48,8 @@ export interface ProactiveControllerDeps {
   onGapDetected?: (recovered: number) => void;
   now?: () => number;
   globallyDisabled?: () => boolean;
+  taskRuntime?: TaskRuntime;
+  resolveTaskThread?: (messageId: string) => Promise<string | undefined>;
 }
 
 export class ProactiveController {
@@ -59,11 +62,19 @@ export class ProactiveController {
   private readonly globallyDisabled: () => boolean;
   private recoverySince: number | undefined;
   private lastReconciliationAt = 0;
+  readonly tasks?: ProactiveTaskController;
 
   constructor(private readonly deps: ProactiveControllerDeps) {
     this.allowedChats = new Set(deps.config.allowedChats);
     this.now = deps.now ?? Date.now;
     this.globallyDisabled = deps.globallyDisabled ?? isProactiveObserverGloballyDisabled;
+    if (deps.taskRuntime && deps.channel.updateCard) {
+      this.tasks = new ProactiveTaskController({
+        config: deps.config, store: deps.store,
+        channel: deps.channel as Pick<LarkChannel, 'send' | 'updateCard'>,
+        runtime: deps.taskRuntime, now: this.now, canAct: () => this.canAct(), resolveThread: deps.resolveTaskThread,
+      });
+    }
   }
 
   async load(): Promise<void> {
@@ -93,6 +104,7 @@ export class ProactiveController {
 
   start(): void {
     if (this.timer || !this.isEnabled()) return;
+    void this.tasks?.recover().catch((err) => log.fail('proactive', err, { step: 'task-recovery' }));
     this.timer = setInterval(
       () => void this.runTick().catch((err) => log.fail('proactive', err, { step: 'tick' })),
       this.deps.config.pollIntervalMs,
@@ -104,6 +116,7 @@ export class ProactiveController {
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    await this.tasks?.stop();
     await this.flush();
   }
 
@@ -111,6 +124,7 @@ export class ProactiveController {
     await this.queue;
     await this.reminderQueue;
     await this.tickQueue;
+    await this.tasks?.flush();
     await this.deps.store.flush();
   }
 
@@ -145,6 +159,12 @@ export class ProactiveController {
     await this.queue;
     const snapshot = this.deps.store.snapshot();
     const watchedThreads = new Map<string, string>();
+    for (const task of snapshot.tasks) {
+      if (task.threadId && this.allowedChats.has(task.chatId) &&
+          !['accepted', 'cancelled'].includes(task.status)) {
+        watchedThreads.set(`${task.chatId}:${task.threadId}`, task.chatId);
+      }
+    }
     for (const followUp of snapshot.followUps) {
       if (
         (followUp.status === 'pending' || followUp.status === 'proposed') &&
@@ -198,6 +218,7 @@ export class ProactiveController {
     operatorId: string,
     messageId: string,
   ): Promise<boolean> {
+    if (await this.tasks?.handleCard(payload, chatId, operatorId, messageId)) return true;
     if (!(PROACTIVE_CARD_MARKER in payload)) return false;
     // Consume our own marker while disabled/Shadow, but leave the ledger
     // untouched. Historical cards therefore cannot bypass a rollback.
@@ -438,6 +459,11 @@ export class ProactiveController {
     this.deps.store.recordMessage(message);
     const now = this.now();
 
+    if (await this.tasks?.handleMessage(message)) {
+      this.recordDecision(message, 'possible-complex-task', 1, this.canAct() ? 'applied' : 'shadow', undefined, 'task-command');
+      return;
+    }
+
     const preferenceCommand = parsePreferenceCommand(message.text);
     if (preferenceCommand) {
       if (!this.canAct()) {
@@ -490,10 +516,20 @@ export class ProactiveController {
           .slice(-this.deps.config.contextMessages),
         pendingFollowUps: this.deps.store.openFollowUps(msg.chatId, msg.threadId),
         now,
+        executionEnabled: this.tasks?.enabled() ?? false,
       });
     } catch (err) {
+      if (await this.tasks?.offer(message, { action: 'ignore', confidence: 0 })) {
+        this.recordDecision(message, 'possible-complex-task', 0, this.canAct() ? 'applied' : 'shadow', undefined, 'explicit-task-fallback');
+        return;
+      }
       this.recordDecision(message, 'ignore', 0, 'failed', undefined, String(err));
       log.warn('proactive', 'decision-failed', { msgId: msg.messageId, err: String(err) });
+      return;
+    }
+
+    if (await this.tasks?.offer(message, result)) {
+      this.recordDecision(message, 'possible-complex-task', result.confidence, this.canAct() ? 'applied' : 'shadow', undefined, 'task-proposal');
       return;
     }
 

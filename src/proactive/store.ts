@@ -7,14 +7,16 @@ import type {
   ProactiveDecision,
   ProactiveState,
   ProactiveUserPreferences,
+  ProactiveTask,
 } from './types';
 
 const EMPTY_STATE: ProactiveState = {
-  version: 2,
+  version: 3,
   messages: [],
   decisions: [],
   followUps: [],
   preferences: [],
+  tasks: [],
   processedMessageIds: [],
 };
 
@@ -33,7 +35,7 @@ export class ProactiveStore {
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8')) as Partial<ProactiveState>;
       this.state = {
-        version: 2,
+        version: 3,
         messages: Array.isArray(raw.messages) ? raw.messages.filter(validMessage) : [],
         decisions: Array.isArray(raw.decisions) ? raw.decisions.filter(validDecision) : [],
         followUps: Array.isArray(raw.followUps)
@@ -42,11 +44,12 @@ export class ProactiveStore {
         preferences: Array.isArray(raw.preferences)
           ? raw.preferences.filter(validPreferences)
           : [],
+        tasks: Array.isArray(raw.tasks) ? raw.tasks.filter(validTask) : [],
         processedMessageIds: Array.isArray(raw.processedMessageIds)
           ? raw.processedMessageIds.filter((id): id is string => typeof id === 'string')
           : [],
       };
-      if (raw.version !== 2 || !Array.isArray(raw.preferences)) {
+      if (raw.version !== 3 || !Array.isArray(raw.tasks)) {
         this.persist();
         await this.flush();
       }
@@ -192,6 +195,30 @@ export class ProactiveStore {
     return structuredClone(this.state);
   }
 
+  getTask(id: string): ProactiveTask | undefined {
+    return this.state.tasks.find((task) => task.id === id);
+  }
+
+  tasksFor(chatId: string, ownerId: string, threadId?: string): ProactiveTask[] {
+    return this.state.tasks.filter((task) =>
+      task.chatId === chatId && task.ownerId === ownerId && task.threadId === threadId);
+  }
+
+  createTask(task: ProactiveTask): boolean {
+    if (this.getTask(task.id)) return false;
+    this.state.tasks.push(task);
+    this.persist();
+    return true;
+  }
+
+  updateTask(id: string, update: Partial<ProactiveTask>): ProactiveTask | undefined {
+    const task = this.getTask(id);
+    if (!task) return undefined;
+    Object.assign(task, update);
+    this.persist();
+    return task;
+  }
+
   async flush(): Promise<void> {
     await this.saving;
     if (this.saveError) throw this.saveError;
@@ -215,6 +242,18 @@ export class ProactiveStore {
       }
     });
   }
+}
+
+function validTask(value: unknown): value is ProactiveTask {
+  const task = value as Partial<ProactiveTask> | undefined;
+  return Boolean(task && typeof task.id === 'string' && typeof task.chatId === 'string' &&
+    typeof task.sourceMessageId === 'string' && typeof task.ownerId === 'string' &&
+    typeof task.request === 'string' && typeof task.fingerprint === 'string' &&
+    ['summary', 'research', 'draft'].includes(task.kind ?? '') &&
+    ['proposed', 'needs_input', 'running', 'publishing', 'delivered', 'accepted', 'failed', 'cancelled'].includes(task.status ?? '') &&
+    Number.isInteger(task.revision) && Number.isFinite(task.createdAt) &&
+    Number.isFinite(task.updatedAt) && Array.isArray(task.artifacts) &&
+    Array.isArray(task.context) && task.context.every(validMessage));
 }
 
 function validMessage(value: unknown): value is ObserverMessage {

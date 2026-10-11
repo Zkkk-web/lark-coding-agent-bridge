@@ -79,6 +79,7 @@ describe('profile schema', () => {
     expect(defaults.proactiveObserver.timeZone).toBe('Asia/Shanghai');
     expect(defaults.proactiveObserver.lowRiskActionThreshold).toBe(0.6);
     expect(defaults.proactiveObserver.pollIntervalMs).toBe(15_000);
+    expect(defaults.proactiveObserver.execution?.enabled).toBe(false);
 
     const configured = normalizeProfileConfig({
       schemaVersion: 2,

@@ -91,11 +91,12 @@ export interface ProactiveDecision {
 }
 
 export interface ProactiveState {
-  version: 2;
+  version: 3;
   messages: ObserverMessage[];
   decisions: ProactiveDecision[];
   followUps: FollowUp[];
   preferences: ProactiveUserPreferences[];
+  tasks: ProactiveTask[];
   processedMessageIds: string[];
 }
 
@@ -104,12 +105,55 @@ export interface DecisionInput {
   recentMessages: ObserverMessage[];
   pendingFollowUps: FollowUp[];
   now: number;
+  executionEnabled?: boolean;
 }
 
 export interface DecisionResult {
   action: ProactiveAction;
   confidence: number;
   model?: string;
+  taskKind?: ProactiveTaskKind;
+}
+
+export type ProactiveTaskKind = 'summary' | 'research' | 'draft';
+export type ProactiveTaskStatus =
+  | 'proposed' | 'needs_input' | 'running' | 'publishing'
+  | 'delivered' | 'accepted' | 'failed' | 'cancelled';
+
+export interface TaskDraft {
+  title: string;
+  content: string;
+  sources: Array<{ title: string; url: string }>;
+}
+
+/** Each revision has its own confirmation; stale cards never approve new scope. */
+export interface ProactiveTask {
+  id: string;
+  chatId: string;
+  threadId?: string;
+  sourceMessageId: string;
+  ownerId: string;
+  kind: ProactiveTaskKind;
+  request: string;
+  context: ObserverMessage[];
+  fingerprint: string;
+  revision: number;
+  status: ProactiveTaskStatus;
+  createdAt: number;
+  updatedAt: number;
+  confirmedAt?: number;
+  confirmedBy?: string;
+  cardMessageId?: string;
+  cardAttemptedAt?: number;
+  progress?: string;
+  question?: string;
+  error?: string;
+  draft?: TaskDraft;
+  documentId?: string;
+  documentUrl?: string;
+  publicationAttemptedAt?: number;
+  artifacts: Array<{ revision: number; url: string; title: string }>;
+  reviewFollowUpId?: string;
 }
 
 export interface DecisionProvider {

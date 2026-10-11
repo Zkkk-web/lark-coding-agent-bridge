@@ -267,6 +267,7 @@ describe('profile store canonical serialization', () => {
       overdueReminderIntervalMinutes: 24 * 60,
       overdueReminderMaxCount: 2,
       defaultDailyReminderLimit: 5,
+      execution: { enabled: true, maxRuntimeMs: 600000, dailyProposalLimit: 3, proposalCooldownMinutes: 10 },
     };
 
     await saveRootConfig({

@@ -2,7 +2,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedMessage } from '@larksuite/channel';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProactiveObserverConfig } from '../../../src/config/profile-schema';
 import { ProactiveController } from '../../../src/proactive/controller';
 import type { ProactiveHistorySource } from '../../../src/proactive/history';
@@ -41,6 +41,23 @@ class FakeDecisionProvider implements DecisionProvider {
 }
 
 describe('proactive follow-up controller', () => {
+  it('routes an explicit document request through the V3 confirmation path even if Jev is unavailable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-v3-routing-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    const fake = createFakeChannel(); const run = vi.fn(async () => ({ status: 'needs_input' as const, question: '请补充材料' }));
+    const controller = new ProactiveController({ config: { ...ACTIVE_CONFIG, execution: { enabled: true, maxRuntimeMs: 30000, dailyProposalLimit: 3, proposalCooldownMinutes: 0 } },
+      store, channel: { send: fake.send, updateCard: async () => {} } as never,
+      decisionProvider: { decide: async () => { throw new Error('judge offline'); } },
+      taskRuntime: { run, publish: async () => { throw new Error('unexpected'); } } });
+    await controller.load();
+    controller.enqueue(message('v3-source', 'oc_intern', '请帮我起草一份测试方案', false, Date.now(), 'topic'));
+    await controller.flush();
+    expect(store.snapshot().tasks[0]!.status).toBe('proposed'); expect(run).not.toHaveBeenCalled();
+    controller.enqueue(message('v3-start', 'oc_intern', `开始 ${store.snapshot().tasks[0]!.id}`, false, Date.now(), 'topic'));
+    await controller.flush(); await controller.tasks!.waitForIdle();
+    expect(run).toHaveBeenCalledOnce(); expect(store.snapshot().followUps).toHaveLength(0);
+    await controller.stop();
+  });
   it('routes only allowlisted non-mention text to the judge', async () => {
     const harness = await createHarness([{ action: 'ignore', confidence: 1 }]);
     expect(harness.controller.handles(message('m1', 'oc_intern', 'hello'))).toBe(true);

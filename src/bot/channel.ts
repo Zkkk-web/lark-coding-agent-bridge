@@ -73,6 +73,8 @@ import { JevDecisionProvider } from '../proactive/decision';
 import { createLarkProactiveHistorySource } from '../proactive/history';
 import { isProactiveObserverGloballyDisabled } from '../proactive/kill-switch';
 import { ProactiveStore } from '../proactive/store';
+import { TaskDocuments, type DocumentClient } from '../proactive/task-documents';
+import { createTaskRuntime } from '../proactive/task-runtime';
 import type { DecisionProvider } from '../proactive/types';
 import {
   consumeCotEvents,
@@ -301,6 +303,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           store: new ProactiveStore(deps.appPaths.proactiveObserverFile),
           decisionProvider: deps.proactiveDecisionProvider ?? new JevDecisionProvider(),
           historySource: createLarkProactiveHistorySource(channel),
+          resolveTaskThread: (messageId) => lookupMessageThreadId(channel, messageId),
+          taskRuntime: controls.profileConfig.agentKind === 'codex' ? createTaskRuntime({
+            executor,
+            profile: () => controls.profileConfig,
+            profileName: controls.profile,
+            stateDir: dirname(deps.appPaths.proactiveObserverFile),
+            documents: new TaskDocuments(channel.rawClient as DocumentClient, cfg.accounts.app.tenant),
+            access: (task) => canUseGroup(controls.profileConfig, controls, task.chatId, task.ownerId),
+          }) : undefined,
           // Reconciliation proves the push stream missed at least one event.
           // Restart after the recovery cycle has persisted the message; the
           // durable history path prevents the restart itself from losing it.
