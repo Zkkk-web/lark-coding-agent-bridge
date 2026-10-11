@@ -115,6 +115,17 @@ describe('confirmed proactive execution', () => {
     expect(h.run).toHaveBeenCalledTimes(1); expect(h.publish).toHaveBeenCalledTimes(1);
   });
 
+  it('returns the committed card view on acceptance and repairs an authorized stale click', async () => {
+    const h = await harness(); await h.offer(); await h.click('start'); await h.controller.waitForIdle();
+    for (let i = 0; i < 2; i++) {
+      const response = await h.click('accept');
+      expect(response).toMatchObject({ card: { type: 'raw', data: { header: { title: { content: '主动助手 · 验收完成' } } } } });
+      expect(response && JSON.stringify(response.card)).not.toContain('继续修改');
+      expect(h.task().status).toBe('accepted');
+    }
+    expect(h.publish).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects other chats, ordinary chatter, negations and operational mutations', async () => {
     const h = await harness();
     await h.offer(message(undefined, { chatId: 'other' }));

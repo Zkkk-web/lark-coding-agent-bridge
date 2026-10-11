@@ -20,6 +20,8 @@ Task-card edits are safe to retry, but initial card creation is not automaticall
 
 Task button callbacks return a toast for accepted actions, stale/foreign cards, paused execution, busy workers and already-changed states. The channel propagates the response back to Feishu; if processing takes over 1.5 seconds it returns only a receipt (not an execution-success claim) while the original operation continues. Subsequent progress and failures remain on the same card. Normalized callback arrival and task binding denials/outcomes are logged without request text or credentials. An absent arrival log is not proof a user did not click: failures before normalization/platform delivery still need client/platform evidence. This does not bypass author, revision, chat or card binding.
 
+An authorized task callback also returns the latest card as `card: { type: 'raw', data: ... }`. Live acceptance exposed an accepted ledger with a still-delivered card after an in-callback REST patch; the callback must carry its authoritative view, not just a toast. Repeated authorized clicks can therefore repair a stale view without repeating execution/publication. Rejected owner/card/revision bindings do not receive this snapshot.
+
 ## Execution and privacy
 
 This implementation supports Codex only, using a fresh private working directory and read-only sandbox. User config, project rules/instructions, shell, apps, hooks, skills, memory and multi-agent behavior are disabled for task runs. Feishu credentials and bridge-bound environment variables are not inherited; the general bridge prompt granting coding capabilities is not used. Normal `@bot` execution is unchanged.

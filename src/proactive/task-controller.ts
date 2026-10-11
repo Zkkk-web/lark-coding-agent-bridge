@@ -122,7 +122,10 @@ export class ProactiveTaskController {
       const before = task.status;
       const result = await this.act(task, String(payload.action));
       log.info('proactive-task', 'card-handled', { taskId: task.id, revision: task.revision, before, after: task.status });
-      return result;
+      // Return the authoritative view with the click response as well. A REST
+      // patch during the pending interaction alone did not reliably refresh the
+      // live card. This also repairs a stale view on an authorized repeat click.
+      return { ...result, card: { type: 'raw', data: taskCard(task) } };
     });
   }
 
