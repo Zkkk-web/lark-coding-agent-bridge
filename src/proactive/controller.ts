@@ -547,8 +547,13 @@ export class ProactiveController {
         pendingFollowUps: this.deps.store.openFollowUps(msg.chatId, msg.threadId),
         now,
         executionEnabled: this.tasks?.enabled() ?? false,
+        ongoingTasks: this.tasks?.continuityContext(message),
       });
     } catch (err) {
+      if (await this.tasks?.observeUpdate(message)) {
+        this.recordDecision(message, 'possible-complex-task', 0, this.canAct() ? 'applied' : 'shadow', undefined, 'task-update-fallback');
+        return;
+      }
       const conditional = await this.conditional.offer(message);
       if (conditional) {
         this.recordDecision(message, 'clarify', 0, conditional.outcome, conditional.targetFollowUpId, conditional.reason);
@@ -563,6 +568,10 @@ export class ProactiveController {
       return;
     }
 
+    if (await this.tasks?.observeUpdate(message, result)) {
+      this.recordDecision(message, 'possible-complex-task', result.continuation?.confidence ?? 1, this.canAct() ? 'applied' : 'shadow', undefined, 'task-update');
+      return;
+    }
     const conditional = await this.conditional.offer(message);
     if (conditional) {
       this.recordDecision(message, 'clarify', result.confidence, conditional.outcome, conditional.targetFollowUpId, conditional.reason);

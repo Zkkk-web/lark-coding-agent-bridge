@@ -81,6 +81,7 @@ describe('profile schema', () => {
     expect(defaults.proactiveObserver.pollIntervalMs).toBe(15_000);
     expect(defaults.proactiveObserver.execution?.enabled).toBe(false);
     expect(defaults.proactiveObserver.conditionalFollowUps).toBe(false);
+    expect(defaults.proactiveObserver.taskContinuity).toBe(false);
 
     const configured = normalizeProfileConfig({
       schemaVersion: 2,

@@ -45,7 +45,7 @@ export class ProactiveStore {
         preferences: Array.isArray(raw.preferences)
           ? raw.preferences.filter(validPreferences)
           : [],
-        tasks: Array.isArray(raw.tasks) ? raw.tasks.filter(validTask) : [],
+        tasks: Array.isArray(raw.tasks) ? raw.tasks.filter(validTask).map(validateTaskUpdates) : [],
         taskDashboards: Array.isArray(raw.taskDashboards) ? raw.taskDashboards.filter(validDashboard) : [],
         processedMessageIds: Array.isArray(raw.processedMessageIds)
           ? raw.processedMessageIds.filter((id): id is string => typeof id === 'string')
@@ -269,6 +269,21 @@ function validTask(value: unknown): value is ProactiveTask {
     Number.isInteger(task.revision) && Number.isFinite(task.createdAt) &&
     Number.isFinite(task.updatedAt) && Array.isArray(task.artifacts) &&
     Array.isArray(task.context) && task.context.every(validMessage));
+}
+
+function validateTaskUpdates(task: ProactiveTask): ProactiveTask {
+  if (task.updates === undefined) return task;
+  const valid = Array.isArray(task.updates) && task.updates.length <= 20 && task.updates.every(u => u &&
+    ['material', 'blocker', 'schedule', 'progress'].includes(u.kind) &&
+    ['pending', 'adopted', 'dismissed'].includes(u.status) && Number.isFinite(u.recordedAt) &&
+    validMessage(u.message) && u.message.chatId === task.chatId && u.message.senderId === task.ownerId &&
+    u.message.threadId === task.threadId && u.message.text.length <= 2000);
+  if (valid) return task;
+  // Never silently drop pending approval data and leave an executable task.
+  log.warn('proactive-task', 'invalid-updates', { taskId: task.id });
+  return { ...task, updates: [], revision: task.revision + 1, confirmedAt: undefined, confirmedBy: undefined,
+    status: ['accepted', 'cancelled'].includes(task.status) ? task.status : 'needs_input',
+    question: '保存的补充动态异常，已停止执行。请核对原话题，补充要求后重新确认。' };
 }
 
 function validDashboard(value: unknown): value is TaskDashboard {

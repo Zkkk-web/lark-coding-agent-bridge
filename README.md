@@ -301,6 +301,8 @@ Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). Afte
 
 ### Experimental: proactive follow-up observer
 
+The V4 pilot adds opt-in `proactiveObserver.taskContinuity: true`: stage materials, blockers, schedule changes and progress for an existing same-owner/topic document task on its original card. Explicit adoption creates a new revision and still requires a separate start. No automatic execution or reminder changes. Default off; see [V4 scope, acceptance and rollback](docs/proactive-continuity-v4.md).
+
 The observer reads non-mention plain-text and text-only rich-post messages in explicitly allowlisted internal chats and uses Jev for structured intent classification. Explicit deadlines create follow-ups immediately; clear commitments without a deadline create a confirmation card in the source topic. A topic may own multiple independently addressable items. Follow-ups support due reminders, bounded overdue chases, completion, cancellation, and postponement across restarts. `@`-assignments remain proposed until the mentioned owner accepts them. Non-mention messages never enter Claude, Codex, or Hermes, and the observer does not mutate calendars, tasks, or Base records.
 
 Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` event, add the bot to the target chat, and set `TYPESAFE_API_KEY` in the service environment. Then add this field to the matching profile. `allowedChats` is an independent hard boundary and is required. Set `LARK_PROACTIVE_OBSERVER_DISABLED=1` as the process-wide emergency kill switch; it overrides every profile and takes effect after restart:

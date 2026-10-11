@@ -301,6 +301,8 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 ### 实验性：主动跟进观察器
 
+V4 试点可另加 `proactiveObserver.taskContinuity: true`：将同一发起人、同一话题内已有文档任务的材料、阻碍、时间变化和进展记录为待确认动态。原卡片提供“采用补充／忽略补充”；采用后还需单独确认开始，不自动执行或修改提醒。默认关闭，详见 [V4 范围、测试与回滚](docs/proactive-continuity-v4.md)。
+
 观察器让 bot 在指定内部群里读取非 `@bot` 的文本，用 Jev 做结构化意图判断。带明确期限的承诺会直接记录；没有期限但意图明确的承诺会在原话题发确认卡。同一话题可拥有多条可独立管理的事项；支持到期提醒、有限次数的逾期追问、完成、取消和延期。`@` 他人的分配会先进入待确认，只有被提及的负责人接受后才生效。它不会把这些消息交给 Claude、Codex 或 Hermes，也不会操作日历、任务或多维表格。
 
 先在飞书开放平台为应用开通 `im:message.group_msg`，订阅 `im.message.receive_v1`，把 bot 加入目标群，并在服务环境中设置 `TYPESAFE_API_KEY`。然后在对应 profile 添加下面的字段；`allowedChats` 是独立的硬白名单，不能省略。紧急情况下可设置进程级开关 `LARK_PROACTIVE_OBSERVER_DISABLED=1`，它会覆盖所有 profile，重启后生效：

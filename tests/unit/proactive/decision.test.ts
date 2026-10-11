@@ -2,6 +2,23 @@ import { describe, expect, it } from 'vitest';
 import { JevDecisionProvider } from '../../../src/proactive/decision';
 
 describe('Jev decision provider', () => {
+  it('classifies an update in the same call only when scoped tasks are provided', async () => {
+    let hasContext = true;
+    const provider = new JevDecisionProvider('test-key', async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      expect(Boolean(body.questions.continuation_kind)).toBe(hasContext);
+      expect(body.state.ongoing_tasks).toHaveLength(hasContext ? 1 : 0);
+      return new Response(JSON.stringify({ model: 'jev-test', answers: {
+        action: { type: 'choice', choice: 'ignore', confidence: .9 },
+        task_kind: { type: 'choice', choice: 'none', confidence: .9 },
+        continuation_kind: { type: 'choice', choice: 'blocker', confidence: .93 },
+      }, usage: { input_tokens: 12, output_tokens: 3 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const input = { message: { messageId: 'm', chatId: 'c', senderId: 'u', text: '上游材料暂时不齐', createTime: 1 }, recentMessages: [], pendingFollowUps: [], now: 2 };
+    expect(await provider.decide({ ...input, ongoingTasks: [{ id: 'pt_test', request: '起草方案', status: 'proposed' }] })).toMatchObject({ continuation: { kind: 'blocker', confidence: .93 } });
+    hasContext = false;
+    expect((await provider.decide(input)).continuation).toBeUndefined();
+  });
   it.each(['summary', 'research', 'draft'] as const)('returns the structured %s task kind', async (kind) => {
     const provider = new JevDecisionProvider('test-key', async (_input, init) => {
       const body = JSON.parse(String(init?.body));

@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -44,6 +44,124 @@ async function harness(options: { active?: boolean; enabled?: boolean; runtime?:
 }
 
 describe('confirmed proactive execution', () => {
+  it.each([
+    ['资料在这里：验收要求正文', 'material'], ['目前还缺客户名单，卡住了', 'blocker'],
+    ['验收时间改到周六下午', 'schedule'], ['目前进展：第一部分已完成', 'progress'],
+  ])('stages %s on the original card and overview', async (text, kind) => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    await h.controller.handleMessage(message('我的主动任务'));
+    const sends = h.channel.send.mock.calls.length;
+    await h.controller.observeUpdate(message(text, { messageId: 'update' }));
+    expect(h.task().updates?.[0]?.kind).toBe(kind); expect(h.task().status).toBe('proposed');
+    expect(h.channel.send).toHaveBeenCalledTimes(sends);
+    expect(JSON.stringify(h.channel.updateCard.mock.calls)).toContain('待确认');
+    expect(h.run).not.toHaveBeenCalled(); expect(h.store.snapshot().followUps).toHaveLength(0);
+  });
+
+  it.each(['flag', 'shadow', 'paused', 'quiet', 'disabled', 'chat', 'owner', 'topic', 'closed', 'old'])('does not capture updates with %s boundary', async boundary => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    const m = message('资料在这里：验收要求正文', { messageId: 'update' });
+    if (boundary === 'flag') h.cfg.taskContinuity = false;
+    if (boundary === 'shadow') h.setActive(false);
+    if (boundary === 'paused') h.store.updatePreferences('owner', { enabled: false });
+    if (boundary === 'quiet') h.store.updatePreferences('owner', { quietHours: { start: '00:00', end: '23:59' } });
+    if (boundary === 'disabled') h.cfg.execution!.enabled = false;
+    if (boundary === 'chat') m.chatId = 'other';
+    if (boundary === 'owner') m.senderId = 'other';
+    if (boundary === 'topic') m.threadId = 'other';
+    if (boundary === 'closed') h.store.updateTask(h.task().id, { status: 'accepted' });
+    if (boundary === 'old') m.createTime = now - 1;
+    await h.controller.observeUpdate(m);
+    expect(h.task().updates ?? []).toHaveLength(0); expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it('asks when multiple tasks match, accepts an exact reply edge, and never steals a reminder', async () => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    h.store.createTask({ ...h.task(), id: 'pt_aaaaaaaaaaaa', sourceMessageId: 'source2', cardMessageId: 'card2' });
+    await h.controller.observeUpdate(message('资料在这里：正文', { messageId: 'u1' }));
+    expect(h.task().updates).toBeUndefined(); expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('多个任务');
+    await h.controller.observeUpdate(message('资料在这里：正文', { messageId: 'u2', replyToMessageId: 'card' }));
+    expect(h.task().updates).toHaveLength(1);
+    h.store.createFollowUp({ id: 'reminder', chatId: 'chat', threadId: 'thread', sourceMessageId: 'r', ownerId: 'owner', summary: '验收', dueAt: now + 10000, status: 'pending', createdAt: now, updatedAt: now });
+    expect(await h.controller.observeUpdate(message('验收时间改到周六', { messageId: 'u3' }))).toBe(false);
+    expect(h.task().updates).toHaveLength(1);
+  });
+
+  it('deduplicates updates, bounds pending size, persists source evidence and handles dismissal', async () => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    const m = message('资料在这里：正文', { messageId: 'u1' });
+    await h.controller.observeUpdate(m); await h.controller.observeUpdate(m);
+    await h.controller.observeUpdate({ ...m, messageId: 'u2' });
+    await h.controller.observeUpdate({ ...m, messageId: 'u3' });
+    await h.controller.observeUpdate({ ...m, messageId: 'u4' });
+    expect(h.task().updates).toHaveLength(3);
+    const reloaded = new ProactiveStore(join(h.dir, 'state.json')); await reloaded.load();
+    expect(reloaded.getTask(h.task().id)?.updates?.[0]?.message).toEqual(m);
+    // Disabling capture does not strand previously staged updates.
+    h.cfg.taskContinuity = false;
+    await h.controller.handleMessage(message(`忽略补充 ${h.task().id}`));
+    expect(h.task().updates?.every(u => u.status === 'dismissed')).toBe(true);
+    expect(h.task().revision).toBe(1); expect(h.task().request).not.toContain('正文');
+  });
+
+  it('rejects approvals older than the latest update and unbound/other-owner update actions', async () => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    await h.controller.observeUpdate(message('资料在这里：正文', { messageId: 'u', createTime: now + 1 }));
+    await h.controller.handleMessage(message(`采用补充 ${h.task().id}`));
+    await h.click('adopt');
+    await h.click('adopt', { updateToken: 'u' }, 'other');
+    expect(h.task().revision).toBe(1); expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it('does not alter an in-flight execution snapshot or publish pending inputs', async () => {
+    let finish!: () => void;
+    const h = await harness({ runtime: { run: async () => { await new Promise<void>(r => { finish = r; }); return { status: 'ready', draft }; } } });
+    h.cfg.taskContinuity = true; await h.offer(); await h.click('start');
+    await h.controller.observeUpdate(message('资料在这里：新增机密测试输入', { messageId: 'u' }));
+    await h.click('adopt', { updateToken: 'u' });
+    expect(h.task().revision).toBe(1); expect(h.task().status).toBe('running');
+    finish(); await h.controller.waitForIdle();
+    expect(h.run.mock.calls[0]![0].request).not.toContain('新增');
+    expect(h.publish.mock.calls[0]![0].context).not.toContainEqual(expect.objectContaining({ messageId: 'u' }));
+    await h.click('accept'); expect(h.task().status).toBe('delivered');
+    await h.click('adopt', { updateToken: 'u' });
+    expect(h.task()).toMatchObject({ revision: 2, status: 'proposed', confirmedAt: undefined });
+    expect(h.task().artifacts).toHaveLength(1); expect(h.publish).toHaveBeenCalledOnce();
+  });
+
+  it('stops a task with malformed saved updates instead of silently making it executable', async () => {
+    const h = await harness(); await h.offer();
+    const path = join(h.dir, 'state.json'); const raw = JSON.parse(await readFile(path, 'utf8'));
+    raw.tasks[0].updates = [{ kind: 'material', status: 'pending', message: null }];
+    await writeFile(path, JSON.stringify(raw));
+    const reloaded = new ProactiveStore(path); await reloaded.load();
+    expect(reloaded.getTask(h.task().id)).toMatchObject({ status: 'needs_input', revision: 2, updates: [] });
+  });
+  it('stages same-topic materials without execution and requires adoption then a fresh start', async () => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    const update = message('资料在这里：https://example.feishu.cn/docx/abc', { messageId: 'material' });
+    expect(await h.controller.observeUpdate(update)).toBe(true);
+    expect(h.task().updates).toMatchObject([{ kind: 'material', status: 'pending', message: update }]);
+    expect(h.task().request).not.toContain('资料在这里');
+    expect(JSON.stringify(h.task().context)).not.toContain('material');
+    await h.click('start'); expect(h.run).not.toHaveBeenCalled();
+    await h.controller.handleMessage(message(`采用补充 ${h.task().id}`));
+    expect(h.task()).toMatchObject({ revision: 2, status: 'proposed', confirmedAt: undefined });
+    expect(h.task().request).toContain(update.text);
+    expect(h.run).not.toHaveBeenCalled();
+    await h.click('start'); await h.controller.waitForIdle();
+    expect(h.run).toHaveBeenCalledOnce(); expect(h.task().status).toBe('delivered');
+  });
+
+  it('rejects a stale adoption card when another update arrives', async () => {
+    const h = await harness(); h.cfg.taskContinuity = true; await h.offer();
+    await h.controller.observeUpdate(message('资料在这里：测试正文', { messageId: 'u1' }));
+    await h.controller.observeUpdate(message('接口还没打通，卡住了', { messageId: 'u2' }));
+    await h.click('adopt', { updateToken: 'u1' });
+    expect(h.task().revision).toBe(1); expect(h.task().updates).toHaveLength(2);
+    expect(JSON.stringify(await h.click('adopt', { updateToken: 'u2' }))).toContain('尚未执行');
+    expect(h.task().revision).toBe(2); expect(h.run).not.toHaveBeenCalled();
+  });
   it('does not intercept a reminder-only completion or commands from another topic/owner', async () => {
     const h = await harness(); await h.offer();
     expect(await h.controller.handleMessage(message('这个完成了'))).toBe(false);

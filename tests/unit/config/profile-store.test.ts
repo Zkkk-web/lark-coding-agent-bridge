@@ -268,6 +268,7 @@ describe('profile store canonical serialization', () => {
       overdueReminderMaxCount: 2,
       defaultDailyReminderLimit: 5,
       conditionalFollowUps: true,
+      taskContinuity: true,
       execution: { enabled: true, maxRuntimeMs: 600000, dailyProposalLimit: 3, proposalCooldownMinutes: 10 },
     };
 

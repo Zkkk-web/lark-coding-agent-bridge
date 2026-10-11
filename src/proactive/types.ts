@@ -123,6 +123,7 @@ export interface DecisionInput {
   pendingFollowUps: FollowUp[];
   now: number;
   executionEnabled?: boolean;
+  ongoingTasks?: Array<Pick<ProactiveTask, 'id' | 'request' | 'status'>>;
 }
 
 export interface DecisionResult {
@@ -130,6 +131,17 @@ export interface DecisionResult {
   confidence: number;
   model?: string;
   taskKind?: ProactiveTaskKind;
+  continuation?: { kind: TaskUpdateKind; confidence: number };
+}
+
+export type TaskUpdateKind = 'material' | 'blocker' | 'schedule' | 'progress';
+export interface TaskUpdate {
+  kind: TaskUpdateKind;
+  message: ObserverMessage;
+  status: 'pending' | 'adopted' | 'dismissed';
+  recordedAt: number;
+  resolvedAt?: number;
+  adoptedRevision?: number;
 }
 
 export type ProactiveTaskKind = 'summary' | 'research' | 'draft';
@@ -174,6 +186,7 @@ export interface ProactiveTask {
   reviewFollowUpId?: string;
   reviewReminderAt?: number;
   cardSyncError?: string;
+  updates?: TaskUpdate[];
 }
 
 export interface TaskDashboard {

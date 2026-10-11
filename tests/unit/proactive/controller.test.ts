@@ -41,6 +41,31 @@ class FakeDecisionProvider implements DecisionProvider {
 }
 
 describe('proactive follow-up controller', () => {
+  it.each([false, true])('routes task updates before new proposals (classifier failure=%s)', async fail => {
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-v4-routing-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    const fake = createFakeChannel(); const now = Date.now(); const run = vi.fn(); const publish = vi.fn();
+    const decide = vi.fn(async (input: DecisionInput): Promise<DecisionResult> => {
+      if (input.message.messageId === 'update') {
+        expect(input.ongoingTasks).toHaveLength(1);
+        if (fail) throw new Error('offline');
+        return { action: 'possible-complex-task', taskKind: 'summary', confidence: .99, continuation: { kind: 'material', confidence: .95 } };
+      }
+      return { action: 'possible-complex-task', taskKind: 'draft', confidence: .99 };
+    });
+    const controller = new ProactiveController({ config: { ...ACTIVE_CONFIG, taskContinuity: true,
+      execution: { enabled: true, maxRuntimeMs: 30000, dailyProposalLimit: 3, proposalCooldownMinutes: 0 } },
+      store, channel: { send: fake.send, updateCard: async () => {} } as never, now: () => now, decisionProvider: { decide }, taskRuntime: { run, publish } });
+    await controller.load();
+    controller.enqueue(message('proposal', 'oc_intern', '请帮我起草验收文档', false, now, 'topic')); await controller.flush();
+    const update = message('update', 'oc_intern', '资料在这里：验收必须检查提醒与撤销功能', false, now + 1, 'topic');
+    controller.enqueue(update); controller.enqueue(update); await controller.flush();
+    expect(store.snapshot().tasks).toHaveLength(1);
+    expect(store.snapshot().tasks[0]?.updates).toMatchObject([{ kind: 'material', status: 'pending' }]);
+    expect(fake.sent).toHaveLength(1); expect(run).not.toHaveBeenCalled();
+    expect(store.snapshot().followUps).toHaveLength(0); expect(decide).toHaveBeenCalledTimes(2);
+    await controller.stop();
+  });
   it('routes contextual approval and acceptance before Jev, and deduplicates repeated message delivery', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'proactive-v31-routing-'));
     const store = new ProactiveStore(join(dir, 'state.json'));

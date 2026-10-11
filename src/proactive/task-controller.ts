@@ -10,6 +10,7 @@ import { localDayBounds, nextAllowedByQuietHours } from './schedule';
 import { ProactiveStore } from './store';
 import { taskCard, taskNextStep, taskOverviewCard, taskSourceUrl, TASK_STATUS_LABELS, TASK_CARD_MARKER } from './task-cards';
 import { parseTaskCommand, taskAcceptsAction } from './task-commands';
+import { detectTaskUpdate, pendingUpdates, updateCandidates, updateToken, UPDATE_LABELS } from './task-continuity';
 import type { DecisionResult, ObserverMessage, ProactiveTask, ProactiveTaskKind, TaskDraft } from './types';
 
 export interface TaskRuntime {
@@ -43,6 +44,53 @@ export class ProactiveTaskController {
   enabled(): boolean { return this.deps.config.execution?.enabled === true; }
   hasActiveWork(): boolean { return this.workers.size > 0 || this.deps.store.snapshot().tasks.some((task) => task.status === 'running' || task.status === 'publishing'); }
   private canAct(): boolean { return this.enabled() && this.deps.canAct(); }
+
+  continuityContext(message: ObserverMessage): Array<Pick<ProactiveTask, 'id' | 'request' | 'status'>> {
+    if (!this.enabled() || !this.deps.config.taskContinuity || !this.deps.config.allowedChats.includes(message.chatId)) return [];
+    return this.continuityCandidates(message)
+      .slice(0, 5).map(t => ({ id: t.id, request: t.request.slice(0, 1500), status: t.status }));
+  }
+
+  private continuityCandidates(message: ObserverMessage): ProactiveTask[] {
+    const candidates = updateCandidates(this.deps.store.tasksFor(message.chatId, message.senderId, message.threadId), message);
+    // A topic can contain a reminder and a document task. A generic date update
+    // must not steal the reminder's command just because there is one document.
+    const reminders = this.deps.store.openFollowUps(message.chatId, message.threadId).some(f => f.ownerId === message.senderId);
+    if (!reminders || /pt_[a-f0-9]{12}/.test(message.text)) return candidates;
+    return candidates.filter(t => message.replyToMessageId !== undefined &&
+      [t.sourceMessageId, t.cardMessageId, ...(t.updates ?? []).map(u => u.message.messageId)].includes(message.replyToMessageId));
+  }
+
+  async observeUpdate(message: ObserverMessage, result?: DecisionResult): Promise<boolean> {
+    if (!this.enabled() || !this.deps.config.taskContinuity || !this.deps.config.allowedChats.includes(message.chatId)) return false;
+    const kind = detectTaskUpdate(message, result);
+    if (!kind) return false;
+    return this.mutate(async () => {
+      const candidates = this.continuityCandidates(message);
+      if (!candidates.length) return false;
+      const prefs = this.deps.store.preferencesFor(message.senderId);
+      if (!this.canAct() || !prefs.enabled || nextAllowedByQuietHours(this.now(), prefs, this.deps.config.timeZone) > this.now()) return true;
+      if (candidates.length !== 1) {
+        await this.reply(message, `有多个任务，未自动关联。请带上编号重发这条动态：${candidates.map(t => t.id).join('、')}。`);
+        return true;
+      }
+      const task = candidates[0]!;
+      if (task.updates?.some(u => u.message.messageId === message.messageId)) return true;
+      if (message.createTime < (task.approvalRequestedAt ?? task.createdAt)) return true;
+      if (message.text.length > 2000 || pendingUpdates(task).length >= 3) {
+        await this.reply(message, `未关联这条动态：每条最多 2000 字，同时最多 3 条待确认。请先处理 ${task.id} 的待确认动态，长材料请提供文档链接。`);
+        return true;
+      }
+      const updates = [...(task.updates ?? []).filter(u => u.status !== 'pending').slice(-17), ...pendingUpdates(task),
+        { kind, message: structuredClone(message), status: 'pending' as const, recordedAt: this.now() }];
+      this.deps.store.updateTask(task.id, { updates, updatedAt: this.now() });
+      await this.deps.store.flush();
+      // Update the existing card/dashboard, never produce another proposal card.
+      await this.render(task);
+      if (task.cardSyncError) await this.reply(message, `已为 ${task.id} 记录待确认动态，但原卡同步失败。请回复“我的主动任务”查看；尚未修改要求或执行。`);
+      return true;
+    });
+  }
 
   async recover(): Promise<void> {
     if (this.recovered || !this.canAct()) return;
@@ -122,6 +170,9 @@ export class ProactiveTaskController {
           !this.deps.config.allowedChats.includes(chatId)) return deny('binding', '这张卡片已失效或不在允许范围内，请查看原话题的最新卡片。');
       if (task.ownerId !== operatorId) return deny('owner', '只有这条需求的发起人可以操作。');
       if (task.revision !== payload.revision) return deny('revision', '要求已更新，请使用最新版本的卡片重新确认。');
+      if (['adopt', 'dismiss'].includes(String(payload.action)) && payload.updateToken !== updateToken(task)) {
+        return deny('update-token', '待确认动态已变化，请查看最新卡片后重新选择。');
+      }
       const before = task.status;
       const result = await this.act(task, String(payload.action));
       log.info('proactive-task', 'card-handled', { taskId: task.id, revision: task.revision, before, after: task.status });
@@ -177,22 +228,19 @@ export class ProactiveTaskController {
         await this.reply(message, '这条操作早于当前版本的确认请求，未修改任务。请查看最新要求后重新确认。');
         return;
       }
+      if (['adopt', 'dismiss'].includes(command.action) && pendingUpdates(task).some(u => u.message.createTime > message.createTime)) {
+        await this.reply(message, '这条操作早于新动态，未修改任务。请看完最新动态后重新选择。');
+        return;
+      }
       if (command.action !== 'cancel' && !this.deps.store.preferencesFor(task.ownerId).enabled) {
         await this.reply(message, '你已暂停主动助手，未修改或启动任务。请恢复后再操作。');
         return;
       }
       if (command.action === 'supplement') {
         if (!command.text) { await this.reply(message, `请回复“补充 ${task.id}：具体要求或材料”。`); return; }
-        if (task.reviewFollowUpId) this.deps.store.updateFollowUp(task.reviewFollowUpId, { status: 'cancelled', updatedAt: this.now() });
-        // Changes revoke prior confirmation and require a new explicit start.
-        this.deps.store.updateTask(task.id, {
-          request: `${task.request}\n补充要求：${command.text}`.slice(-8000),
-          context: [...task.context, message].slice(-20), revision: task.revision + 1,
-          status: 'proposed', question: undefined, error: undefined, progress: undefined,
-          confirmedAt: undefined, confirmedBy: undefined, publicationAttemptedAt: undefined,
-          documentId: undefined, documentUrl: undefined, draft: undefined, reviewReminderAt: undefined,
-          updatedAt: this.now(), approvalRequestedAt: this.now(),
-        });
+        if (!this.revise(task, `补充要求：${command.text}`, [message])) {
+          await this.reply(message, '累计要求过长，未修改任务。请整理为一份文档后提供链接。'); return;
+        }
         await this.deps.store.flush();
         await this.render(task);
         await this.reply(message, `已更新 ${task.id} 第 ${task.revision} 版，尚未执行。请查看新要求，再回复“开始 ${task.id}”。${task.cardSyncError ? '\n原卡同步失败，可回复“我的主动任务”核查状态。' : ''}`);
@@ -207,6 +255,21 @@ export class ProactiveTaskController {
   private async act(task: ProactiveTask, action: string): Promise<ReturnType<typeof cardFeedback>> {
     const prefs = this.deps.store.preferencesFor(task.ownerId);
     if (action !== 'cancel' && !prefs.enabled) return cardFeedback('你已暂停主动助手，请恢复后再操作。', 'warning');
+    const pending = pendingUpdates(task);
+    if (['adopt', 'dismiss'].includes(action)) {
+      if (!pending.length || ['accepted', 'cancelled'].includes(task.status)) return cardFeedback('没有可处理的待确认动态。');
+      if (action === 'adopt') {
+        if (this.workers.has(task.id) || ['running', 'publishing'].includes(task.status)) return cardFeedback('本次正在按已确认版本执行。结束后可采用新材料，再单独确认下一版。', 'warning');
+        if (!this.revise(task, pending.map(u => `${UPDATE_LABELS[u.kind]}（用户原文）：${u.message.text}`).join('\n'), pending.map(u => u.message))) {
+          return cardFeedback('累计要求过长，未采用。请整理为文档链接后补充。', 'warning');
+        }
+      }
+      this.deps.store.updateTask(task.id, { updates: (task.updates ?? []).map(u => u.status === 'pending'
+        ? { ...u, status: action === 'adopt' ? 'adopted' : 'dismissed', resolvedAt: this.now(), adoptedRevision: action === 'adopt' ? task.revision : undefined } : u), updatedAt: this.now() });
+      await this.deps.store.flush(); await this.render(task);
+      return cardFeedback(action === 'adopt' ? `已采用补充，第 ${task.revision} 版尚未执行。请查看要求后单独确认开始。` : '已忽略这批动态，原要求与交付物不变。', 'success');
+    }
+    if (pending.length && ['start', 'retry', 'accept'].includes(action)) return cardFeedback('有待确认动态，请先采用或忽略，再确认执行或验收。', 'warning');
     if (action === 'cancel' && !['accepted', 'cancelled', 'delivered'].includes(task.status)) {
       this.deps.store.updateTask(task.id, { status: 'cancelled', progress: '任务已停止。', question: undefined, error: undefined, updatedAt: this.now() });
       this.workers.get(task.id)?.abort.abort();
@@ -258,6 +321,21 @@ export class ProactiveTaskController {
       review: '已设置明天的成果检查提醒。', adjust: '请补充具体要求，补充后需重新确认。', revise: '请补充修改要求，补充后需重新确认。',
     };
     return cardFeedback(receipts[action] ?? '操作已完成，请查看原卡片。', 'success');
+  }
+
+  /** Scope changes are durable but never executable until a new explicit start. */
+  private revise(task: ProactiveTask, addition: string, messages: ObserverMessage[]): boolean {
+    const request = `${task.request}\n${addition}`;
+    if (request.length > 24000) return false;
+    if (task.reviewFollowUpId) this.deps.store.updateFollowUp(task.reviewFollowUpId, { status: 'cancelled', updatedAt: this.now() });
+    this.deps.store.updateTask(task.id, {
+      request, context: [...task.context, ...messages].slice(-20), revision: task.revision + 1,
+      status: 'proposed', question: undefined, error: undefined, progress: undefined,
+      confirmedAt: undefined, confirmedBy: undefined, publicationAttemptedAt: undefined,
+      documentId: undefined, documentUrl: undefined, draft: undefined, reviewReminderAt: undefined,
+      updatedAt: this.now(), approvalRequestedAt: this.now(),
+    });
+    return true;
   }
 
   private async execute(task: ProactiveTask, abort: AbortController): Promise<void> {

@@ -4,6 +4,8 @@ Tracking: upstream issue #321; additive to V2 (#320). Default off, no automatic 
 
 Follow-on: [V3.1 contextual controls and visible status](proactive-conversation-v31.md) (#323).
 
+Next opt-in slice: [V4 reviewed task continuity](proactive-continuity-v4.md) (#327).
+
 ## Product boundary
 
 The existing V2 reminder ledger stays separate from the task ledger. A need for summary, public research or document drafting can produce a proposal; it is not authorization to execute. Only the source author can start, change or accept that task. A card callback binds task ID, revision, chat, author and card message ID. Text commands bind author, chat and topic and require an ID when ambiguous. Changed requirements create a new revision and invalidate previous approval. Confirmations are persisted before starting the worker.

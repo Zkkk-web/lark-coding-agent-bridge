@@ -1,5 +1,6 @@
 import type { FollowUp, ProactiveTask } from './types';
 import { conditionalNextStep, conditionalStage } from './conditional-intent';
+import { pendingUpdates, updateNextStep, updateToken, UPDATE_LABELS } from './task-continuity';
 
 export const TASK_CARD_MARKER = '__proactive_task';
 export const TASK_STATUS_LABELS = {
@@ -13,7 +14,15 @@ export function taskCard(task: ProactiveTask): object {
   const color = task.status === 'failed' ? 'red' :
     task.status === 'delivered' || task.status === 'accepted' ? 'green' : 'blue';
   const actions: object[] = [];
-  if (task.status === 'proposed') {
+  const pending = pendingUpdates(task);
+  const updateDetail = updateNextStep(task);
+  const adopted = (task.updates ?? []).filter(u => u.status === 'adopted' && u.adoptedRevision === task.revision);
+  const shownUpdates = updateDetail ? pending : adopted;
+  if (updateDetail) {
+    if (!['running', 'publishing'].includes(task.status)) actions.push(button(task, '采用补充', 'adopt', true));
+    actions.push(button(task, '忽略补充', 'dismiss', !actions.length));
+    if (!['delivered'].includes(task.status)) actions.push(button(task, '取消任务', 'cancel'));
+  } else if (task.status === 'proposed') {
     actions.push(button(task, '开始整理', 'start', true), button(task, '调整要求', 'adjust'), button(task, '暂时不用', 'cancel'));
   } else if (task.status === 'running' || task.status === 'publishing' || task.status === 'needs_input') {
     actions.push(button(task, '取消任务', 'cancel'));
@@ -41,10 +50,14 @@ export function taskCard(task: ProactiveTask): object {
           elements: [{ tag: 'markdown', content: `**要做的事**\n${escapeCardText(task.request.slice(0, 800))}` }],
         }] },
         { tag: 'markdown', content: escapeCardText(detail.slice(0, 700)) },
+        ...(shownUpdates.length ? [{ tag: 'column_set', flex_mode: 'none', columns: [{
+          tag: 'column', width: 'weighted', weight: 1, background_style: 'grey-50', padding: '12px',
+          elements: [{ tag: 'markdown', content: `**${updateDetail ? '待确认动态' : '本版已采用的补充'}**\n${shownUpdates.map(u => `${UPDATE_LABELS[u.kind]}：${escapeCardText(u.message.text.slice(0, 240))}${u.message.text.length > 240 ? '…（完整内容见原话题消息）' : ''}`).join('\n')}${updateDetail ? `\n\n${escapeCardText(updateDetail)}` : ''}` }],
+        }] }] : []),
         ...(task.documentUrl && ['delivered', 'accepted'].includes(task.status) ? [{
           tag: 'markdown', content: `**[打开交付文档](${task.documentUrl})**${task.reviewReminderAt && task.status === 'delivered' ? '\n已设置成果检查提醒。' : ''}`,
         }] : []),
-        ...(task.status === 'needs_input' ? [{ tag: 'markdown', content: `在原话题回复：补充 ${task.id}：你的要求或材料。补充后会再次展示执行范围。`, text_size: 'notation' }] : []),
+        ...(task.status === 'needs_input' && !updateDetail ? [{ tag: 'markdown', content: `在原话题回复：补充 ${task.id}：你的要求或材料。补充后会再次展示执行范围。`, text_size: 'notation' }] : []),
         ...(actions.length ? [{ tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px',
           columns: actions.map((action) => ({ tag: 'column', width: 'weighted', weight: 1, elements: [action] })),
         }] : []),
@@ -59,6 +72,7 @@ function button(task: ProactiveTask, label: string, action: string, primary = fa
     type: primary ? 'primary_filled' : 'default', width: 'fill',
     behaviors: [{ type: 'callback', value: {
       [TASK_CARD_MARKER]: true, taskId: task.id, revision: task.revision, action,
+      ...(['adopt', 'dismiss'].includes(action) ? { updateToken: updateToken(task) } : {}),
     } }],
   };
 }
@@ -74,6 +88,8 @@ export function taskSourceUrl(task: Pick<ProactiveTask, 'chatId' | 'threadId' | 
 }
 
 export function taskNextStep(task: ProactiveTask): string {
+  const update = updateNextStep(task);
+  if (update) return update;
   switch (task.status) {
     case 'proposed': return `回复“开始 ${task.id}”确认执行；也可先补充要求。`;
     case 'needs_input': return `回复“补充 ${task.id}：材料或要求”，随后重新确认。`;
