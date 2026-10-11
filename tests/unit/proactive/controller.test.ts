@@ -159,6 +159,73 @@ describe('proactive follow-up controller', () => {
     await harness.controller.stop();
   });
 
+  it('lets deterministic reminder evidence override an anomalously low model score', async () => {
+    const now = Date.parse('2026-10-11T03:53:00.000Z');
+    const harness = await createHarness([{ action: 'create', confidence: 0.42 }], now);
+    harness.controller.enqueue(
+      message(
+        'm-low-score-explicit',
+        'oc_intern',
+        '我需要在 3 分钟后完成主动式智能体验收',
+        false,
+        now,
+        'omt_acceptance',
+      ),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps[0]).toMatchObject({
+      dueAt: now + 3 * 60_000,
+      threadId: 'omt_acceptance',
+    });
+    expect(harness.store.snapshot().decisions.at(-1)).toMatchObject({
+      confidence: 0.42,
+      outcome: 'applied',
+      reason: 'deterministic-low-risk-evidence',
+    });
+    expect(harness.channel.sent[0]?.options).toEqual({
+      replyTo: 'm-low-score-explicit',
+      replyInThread: true,
+    });
+    await harness.controller.stop();
+  });
+
+  it('does not let an explicit time alone override low-confidence create intent', async () => {
+    const now = Date.parse('2026-10-11T03:53:00.000Z');
+    const harness = await createHarness([{ action: 'create', confidence: 0.42 }], now);
+    harness.controller.enqueue(
+      message('m-low-score-weather', 'oc_intern', '3 分钟后气温会下降', false, now),
+    );
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps).toHaveLength(0);
+    expect(harness.store.snapshot().decisions.at(-1)?.outcome).toBe('ignored');
+    expect(harness.channel.sent).toHaveLength(0);
+    await harness.controller.stop();
+  });
+
+  it('accepts a normalized plain-text post as proactive input', async () => {
+    const now = Date.parse('2026-10-11T03:52:00.000Z');
+    const harness = await createHarness([{ action: 'create', confidence: 0.9 }], now);
+    const post = {
+      ...message(
+        'm-post-explicit',
+        'oc_intern',
+        '我需要在 3 分钟后完成主动式智能体验收',
+        false,
+        now,
+        'omt_acceptance',
+      ),
+      rawContentType: 'post',
+    };
+
+    expect(harness.controller.handles(post)).toBe(true);
+    harness.controller.enqueue(post);
+    await harness.controller.flush();
+    expect(harness.store.snapshot().followUps).toHaveLength(1);
+    await harness.controller.stop();
+  });
+
   it('keeps low-confidence create decisions below the low-risk threshold side-effect free', async () => {
     const harness = await createHarness([{ action: 'create', confidence: 0.59 }]);
     harness.controller.enqueue(message('m-low', 'oc_intern', '我明天交报告'));

@@ -126,7 +126,7 @@ function normalizeItem(
   botOpenId: string | undefined,
 ): ObserverMessage | undefined {
   if (
-    item.msg_type !== 'text' ||
+    (item.msg_type !== 'text' && item.msg_type !== 'post') ||
     item.sender?.sender_type !== 'user' ||
     !item.message_id ||
     !item.sender.id ||
@@ -137,14 +137,14 @@ function normalizeItem(
   if (botOpenId && item.mentions?.some((mention) => mention.id === botOpenId)) {
     return undefined;
   }
-  let text: string;
+  let text: string | undefined;
   try {
-    const body = JSON.parse(item.body.content) as { text?: unknown };
-    if (typeof body.text !== 'string' || body.text.trim() === '') return undefined;
-    text = body.text.trim();
+    const body = JSON.parse(item.body.content) as unknown;
+    text = item.msg_type === 'text' ? extractTextMessage(body) : extractPostMessage(body);
   } catch {
     return undefined;
   }
+  if (!text) return undefined;
   const createTime = Number(item.create_time);
   if (!Number.isFinite(createTime)) return undefined;
   return {
@@ -156,4 +156,46 @@ function normalizeItem(
     text,
     createTime,
   };
+}
+
+function extractTextMessage(body: unknown): string | undefined {
+  if (!isRecord(body) || typeof body.text !== 'string') return undefined;
+  return nonEmpty(body.text);
+}
+
+function extractPostMessage(body: unknown): string | undefined {
+  if (!isRecord(body)) return undefined;
+  const localized = Object.values(body).find(
+    (value) => isRecord(value) && Array.isArray(value.content),
+  );
+  const post = isRecord(localized) ? localized : body;
+  if (!Array.isArray(post.content)) return undefined;
+
+  const lines: string[] = [];
+  if (typeof post.title === 'string' && post.title.trim()) lines.push(post.title.trim());
+  for (const row of post.content) {
+    if (!Array.isArray(row)) continue;
+    const line = row
+      .map((element) => {
+        if (!isRecord(element)) return '';
+        if (typeof element.text === 'string') return element.text;
+        if (element.tag === 'at' && typeof element.user_name === 'string') {
+          return `@${element.user_name}`;
+        }
+        return '';
+      })
+      .join('')
+      .trim();
+    if (line) lines.push(line);
+  }
+  return nonEmpty(lines.join('\n'));
+}
+
+function nonEmpty(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

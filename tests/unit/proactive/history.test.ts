@@ -33,9 +33,25 @@ describe('proactive history recovery', () => {
                         body: { content: JSON.stringify({ text: '@机器人 执行' }) },
                       },
                       {
+                        message_id: 'm_post',
+                        thread_id: 'omt_1',
+                        chat_id: 'oc_intern',
+                        msg_type: 'post',
+                        create_time: '1236',
+                        sender: { id: 'ou_user', sender_type: 'user', sender_name: '测试用户' },
+                        body: {
+                          content: JSON.stringify({
+                            zh_cn: {
+                              title: '',
+                              content: [[{ tag: 'text', text: '我需要在 3 分钟后完成验收' }]],
+                            },
+                          }),
+                        },
+                      },
+                      {
                         message_id: 'm_app',
                         msg_type: 'text',
-                        create_time: '1236',
+                        create_time: '1237',
                         sender: { id: 'cli_app', sender_type: 'app' },
                         body: { content: JSON.stringify({ text: '机器人消息' }) },
                       },
@@ -59,6 +75,15 @@ describe('proactive history recovery', () => {
         senderName: '测试用户',
         text: '已完成',
         createTime: 1234,
+      },
+      {
+        messageId: 'm_post',
+        chatId: 'oc_intern',
+        threadId: 'omt_1',
+        senderId: 'ou_user',
+        senderName: '测试用户',
+        text: '我需要在 3 分钟后完成验收',
+        createTime: 1236,
       },
     ]);
     expect(calls[0]).toMatchObject({
