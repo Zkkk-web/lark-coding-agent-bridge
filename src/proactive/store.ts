@@ -6,13 +6,15 @@ import type {
   ObserverMessage,
   ProactiveDecision,
   ProactiveState,
+  ProactiveUserPreferences,
 } from './types';
 
 const EMPTY_STATE: ProactiveState = {
-  version: 1,
+  version: 2,
   messages: [],
   decisions: [],
   followUps: [],
+  preferences: [],
   processedMessageIds: [],
 };
 
@@ -31,10 +33,15 @@ export class ProactiveStore {
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8')) as Partial<ProactiveState>;
       this.state = {
-        version: 1,
+        version: 2,
         messages: Array.isArray(raw.messages) ? raw.messages.filter(validMessage) : [],
         decisions: Array.isArray(raw.decisions) ? raw.decisions.filter(validDecision) : [],
-        followUps: Array.isArray(raw.followUps) ? raw.followUps.filter(validFollowUp) : [],
+        followUps: Array.isArray(raw.followUps)
+          ? raw.followUps.filter(validFollowUp).map(migrateFollowUp)
+          : [],
+        preferences: Array.isArray(raw.preferences)
+          ? raw.preferences.filter(validPreferences)
+          : [],
         processedMessageIds: Array.isArray(raw.processedMessageIds)
           ? raw.processedMessageIds.filter((id): id is string => typeof id === 'string')
           : [],
@@ -90,13 +97,26 @@ export class ProactiveStore {
     );
   }
 
+  openFollowUps(chatId: string, threadId?: string): FollowUp[] {
+    return this.state.followUps.filter(
+      (item) =>
+        item.chatId === chatId &&
+        item.threadId === threadId &&
+        (item.status === 'proposed' || item.status === 'pending'),
+    );
+  }
+
+  userFollowUps(userId: string): FollowUp[] {
+    return this.state.followUps.filter((item) => item.ownerId === userId);
+  }
+
   dueFollowUps(now: number): FollowUp[] {
     return this.state.followUps.filter(
       (item) =>
         item.status === 'pending' &&
-        item.dueAt <= now &&
-        item.reminderAttemptedAt === undefined &&
-        item.reminderSentAt === undefined,
+        item.dueAt !== undefined &&
+        (item.nextReminderAt ?? item.dueAt) <= now &&
+        item.reminderAttemptedAt === undefined,
     );
   }
 
@@ -125,6 +145,43 @@ export class ProactiveStore {
     Object.assign(item, update);
     this.persist();
     return item;
+  }
+
+  preferencesFor(userId: string, defaultDailyReminderLimit = 5): ProactiveUserPreferences {
+    return (
+      this.state.preferences.find((item) => item.userId === userId) ?? {
+        userId,
+        enabled: true,
+        overdueReminders: true,
+        dailyReminderLimit: defaultDailyReminderLimit,
+        updatedAt: 0,
+      }
+    );
+  }
+
+  updatePreferences(
+    userId: string,
+    update: Partial<Omit<ProactiveUserPreferences, 'userId'>>,
+    defaultDailyReminderLimit = 5,
+  ): ProactiveUserPreferences {
+    let item = this.state.preferences.find((candidate) => candidate.userId === userId);
+    if (!item) {
+      item = this.preferencesFor(userId, defaultDailyReminderLimit);
+      this.state.preferences.push(item);
+    }
+    Object.assign(item, update);
+    this.persist();
+    return item;
+  }
+
+  remindersSentBy(userId: string, from: number, to: number): number {
+    return this.state.followUps.reduce(
+      (count, item) =>
+        item.ownerId === userId
+          ? count + (item.reminderHistory ?? []).filter((sentAt) => sentAt >= from && sentAt < to).length
+          : count,
+      0,
+    );
   }
 
   snapshot(): ProactiveState {
@@ -164,6 +221,11 @@ function validMessage(value: unknown): value is ObserverMessage {
       typeof item.chatId === 'string' &&
       (item.threadId === undefined || typeof item.threadId === 'string') &&
       typeof item.senderId === 'string' &&
+      (item.mentions === undefined ||
+        (Array.isArray(item.mentions) &&
+          item.mentions.every((mention) =>
+            Boolean(mention && typeof mention.id === 'string'),
+          ))) &&
       typeof item.text === 'string' &&
       typeof item.createTime === 'number',
   );
@@ -183,8 +245,40 @@ function validFollowUp(value: unknown): value is FollowUp {
       (item.threadId === undefined || typeof item.threadId === 'string') &&
       typeof item.sourceMessageId === 'string' &&
       typeof item.summary === 'string' &&
-      typeof item.dueAt === 'number' &&
-      (item.status === 'pending' || item.status === 'completed' || item.status === 'cancelled'),
+      (item.dueAt === undefined || typeof item.dueAt === 'number') &&
+      (item.status === 'proposed' ||
+        item.status === 'pending' ||
+        item.status === 'completed' ||
+        item.status === 'cancelled') &&
+      (item.status === 'proposed' || typeof item.dueAt === 'number'),
+  );
+}
+
+function migrateFollowUp(item: FollowUp): FollowUp {
+  const reminderHistory = item.reminderHistory ??
+    (item.reminderSentAt === undefined ? [] : [item.reminderSentAt]);
+  return {
+    ...item,
+    createdById: item.createdById ?? item.ownerId,
+    reminderHistory,
+    overdueReminderCount: item.overdueReminderCount ?? Math.max(0, reminderHistory.length - 1),
+    ...(item.status === 'pending' && item.dueAt !== undefined && item.nextReminderAt === undefined
+      ? { nextReminderAt: item.reminderSentAt === undefined ? item.dueAt : undefined }
+      : {}),
+  };
+}
+
+function validPreferences(value: unknown): value is ProactiveUserPreferences {
+  const item = value as Partial<ProactiveUserPreferences> | undefined;
+  return Boolean(
+    item &&
+      typeof item.userId === 'string' &&
+      typeof item.enabled === 'boolean' &&
+      typeof item.overdueReminders === 'boolean' &&
+      typeof item.dailyReminderLimit === 'number' &&
+      typeof item.updatedAt === 'number' &&
+      (item.quietHours === undefined ||
+        (typeof item.quietHours.start === 'string' && typeof item.quietHours.end === 'string')),
   );
 }
 

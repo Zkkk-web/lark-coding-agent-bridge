@@ -263,6 +263,10 @@ describe('profile store canonical serialization', () => {
       contextMessages: 20,
       contextWindowHours: 24,
       pollIntervalMs: 60_000,
+      dueSoonMinutes: 60,
+      overdueReminderIntervalMinutes: 24 * 60,
+      overdueReminderMaxCount: 2,
+      defaultDailyReminderLimit: 5,
     };
 
     await saveRootConfig({

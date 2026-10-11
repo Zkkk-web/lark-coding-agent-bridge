@@ -16,7 +16,7 @@ interface ApiMessageItem {
     sender_name?: string;
   };
   body?: { content?: string };
-  mentions?: Array<{ id?: string }>;
+  mentions?: Array<{ id?: string; name?: string; user_name?: string }>;
 }
 
 interface MessageListResponse {
@@ -147,12 +147,21 @@ function normalizeItem(
   if (!text) return undefined;
   const createTime = Number(item.create_time);
   if (!Number.isFinite(createTime)) return undefined;
+  const mentions = (item.mentions ?? [])
+    .filter((mention) => Boolean(mention.id) && mention.id !== botOpenId)
+    .map((mention) => ({
+      id: mention.id!,
+      ...(mention.name ?? mention.user_name
+        ? { name: mention.name ?? mention.user_name }
+        : {}),
+    }));
   return {
     messageId: item.message_id,
     chatId: item.chat_id ?? fallbackChatId,
     ...(item.thread_id ? { threadId: item.thread_id } : {}),
     senderId: item.sender.id,
     ...(item.sender.sender_name ? { senderName: item.sender.sender_name } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
     text,
     createTime,
   };

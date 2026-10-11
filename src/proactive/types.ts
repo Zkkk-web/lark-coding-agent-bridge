@@ -5,9 +5,16 @@ export type ProactiveAction =
   | 'cancel'
   | 'postpone'
   | 'clarify'
+  | 'list'
+  | 'settings'
   | 'possible-complex-task';
 
-export type FollowUpStatus = 'pending' | 'completed' | 'cancelled';
+export type FollowUpStatus = 'proposed' | 'pending' | 'completed' | 'cancelled';
+
+export interface ObserverMention {
+  id: string;
+  name?: string;
+}
 
 export interface ObserverMessage {
   messageId: string;
@@ -15,6 +22,7 @@ export interface ObserverMessage {
   threadId?: string;
   senderId: string;
   senderName?: string;
+  mentions?: ObserverMention[];
   text: string;
   createTime: number;
 }
@@ -26,8 +34,12 @@ export interface FollowUp {
   threadId?: string;
   sourceMessageId: string;
   summary: string;
+  /** User who authored the commitment or assignment. */
+  createdById?: string;
+  /** User responsible for confirming and completing the item. */
   ownerId: string;
-  dueAt: number;
+  /** Missing while a proposal is waiting for the owner to choose a deadline. */
+  dueAt?: number;
   status: FollowUpStatus;
   createdAt: number;
   updatedAt: number;
@@ -43,7 +55,28 @@ export interface FollowUp {
   reminderAttemptedAt?: number;
   reminderSentAt?: number;
   reminderMessageId?: string;
+  /** Successful reminder deliveries, used for limits and auditability. */
+  reminderHistory?: number[];
+  /** Number of overdue chases sent after the first due reminder. */
+  overdueReminderCount?: number;
+  /** Next eligible reminder instant. Defaults to dueAt for migrated V1 items. */
+  nextReminderAt?: number;
+  confirmedAt?: number;
   resolutionMessageId?: string;
+}
+
+export interface QuietHours {
+  start: string;
+  end: string;
+}
+
+export interface ProactiveUserPreferences {
+  userId: string;
+  enabled: boolean;
+  overdueReminders: boolean;
+  dailyReminderLimit: number;
+  quietHours?: QuietHours;
+  updatedAt: number;
 }
 
 export interface ProactiveDecision {
@@ -58,10 +91,11 @@ export interface ProactiveDecision {
 }
 
 export interface ProactiveState {
-  version: 1;
+  version: 2;
   messages: ObserverMessage[];
   decisions: ProactiveDecision[];
   followUps: FollowUp[];
+  preferences: ProactiveUserPreferences[];
   processedMessageIds: string[];
 }
 

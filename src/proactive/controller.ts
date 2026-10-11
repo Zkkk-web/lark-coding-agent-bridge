@@ -2,13 +2,26 @@ import { createHash } from 'node:crypto';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ProactiveObserverConfig } from '../config/profile-schema';
 import { log, reportMetric } from '../core/logger';
-import { followUpRecordedCard, PROACTIVE_CARD_MARKER, reminderCard } from './cards';
+import {
+  dashboardCard,
+  followUpRecordedCard,
+  proposalCard,
+  PROACTIVE_CARD_MARKER,
+  reminderCard,
+} from './cards';
 import { DAY_MS, formatDueAt, parseExplicitDueAt, parsePostponeDueAt } from './due';
 import type { ProactiveHistorySource } from './history';
 import { isProactiveObserverGloballyDisabled } from './kill-switch';
 import { ProactiveStore } from './store';
+import {
+  localDayBounds,
+  nextAllowedByQuietHours,
+  parseQuietHours,
+  quickDueAt,
+} from './schedule';
 import type {
   DecisionProvider,
+  DecisionResult,
   FollowUp,
   ObserverMessage,
   ProactiveAction,
@@ -17,6 +30,12 @@ import type {
 
 const RECONCILIATION_INTERVAL_MS = 30_000;
 const MAX_RECENT_THREADS = 10;
+
+type PreferenceCommand =
+  | { kind: 'enabled'; value: boolean }
+  | { kind: 'overdue'; value: boolean }
+  | { kind: 'daily-limit'; value: number }
+  | { kind: 'quiet-hours'; value?: { start: string; end: string } };
 
 export interface ProactiveControllerDeps {
   config: ProactiveObserverConfig;
@@ -128,7 +147,7 @@ export class ProactiveController {
     const watchedThreads = new Map<string, string>();
     for (const followUp of snapshot.followUps) {
       if (
-        followUp.status === 'pending' &&
+        (followUp.status === 'pending' || followUp.status === 'proposed') &&
         followUp.threadId &&
         this.allowedChats.has(followUp.chatId)
       ) {
@@ -190,8 +209,14 @@ export class ProactiveController {
     const id = typeof payload.followUpId === 'string' ? payload.followUpId : '';
     const action = payload.action;
     const item = this.deps.store.getFollowUp(id);
-    if (!item || item.chatId !== chatId || item.status !== 'pending') return true;
-    if (item.ownerId !== operatorId) {
+    if (
+      !item ||
+      item.chatId !== chatId ||
+      (item.status !== 'pending' && item.status !== 'proposed')
+    ) return true;
+    const creatorMayReject =
+      item.status === 'proposed' && action === 'cancel' && item.createdById === operatorId;
+    if (item.ownerId !== operatorId && !creatorMayReject) {
       log.warn('proactive', 'card-denied-owner', { followUpId: id, operatorId });
       return true;
     }
@@ -204,20 +229,62 @@ export class ProactiveController {
         updatedAt: now,
         resolutionMessageId: messageId,
       });
-    } else if (action === 'postpone') {
+    } else if (action === 'postpone' && item.status === 'pending') {
+      const dueAt = now + DAY_MS;
       updated = this.deps.store.updateFollowUp(id, {
-        dueAt: now + DAY_MS,
+        dueAt,
+        nextReminderAt: dueAt,
         updatedAt: now,
         reminderAttemptedAt: undefined,
         reminderSentAt: undefined,
         reminderMessageId: undefined,
+        overdueReminderCount: 0,
+        resolutionMessageId: messageId,
+      });
+    } else if (
+      item.status === 'proposed' &&
+      (action === 'accept' ||
+        action === 'confirm-today' ||
+        action === 'confirm-tomorrow' ||
+        action === 'confirm-next-week')
+    ) {
+      const dueAt = action === 'accept'
+        ? item.dueAt
+        : quickDueAt(
+            action === 'confirm-today'
+              ? 'today'
+              : action === 'confirm-tomorrow'
+                ? 'tomorrow'
+                : 'next-week',
+            now,
+            this.deps.config.timeZone,
+          );
+      if (dueAt === undefined) return true;
+      updated = this.deps.store.updateFollowUp(id, {
+        status: 'pending',
+        dueAt,
+        nextReminderAt: dueAt,
+        confirmedAt: now,
+        updatedAt: now,
         resolutionMessageId: messageId,
       });
     } else {
       return true;
     }
     await this.deps.store.flush();
-    if (updated) await this.sendActionConfirmation(updated, action, messageId);
+    if (updated) {
+      if (updated.status === 'pending' && item.status === 'proposed') {
+        await this.sendTextReply(
+          updated.chatId,
+          updated.threadId,
+          messageId,
+          `✅ 已确认跟进：${updated.summary}\n提醒时间：${formatDueAt(updated.dueAt!, this.deps.config.timeZone)}`,
+          'proposal-confirmed',
+        );
+      } else {
+        await this.sendActionConfirmation(updated, action as ProactiveAction, messageId);
+      }
+    }
     log.info('proactive', 'card-applied', { action, followUpId: id, operatorId });
     reportMetric('proactive_action', 1, { action: String(action) });
     return true;
@@ -245,6 +312,50 @@ export class ProactiveController {
         log.warn('proactive', 'reminder-denied-chat', { followUpId: item.id, chatId: item.chatId });
         continue;
       }
+      const preferences = this.deps.store.preferencesFor(
+        item.ownerId,
+        this.deps.config.defaultDailyReminderLimit,
+      );
+      if (!preferences.enabled) continue;
+      if (
+        item.reminderSentAt !== undefined &&
+        (!preferences.overdueReminders ||
+          (item.overdueReminderCount ?? 0) >= this.deps.config.overdueReminderMaxCount)
+      ) {
+        this.deps.store.updateFollowUp(item.id, {
+          nextReminderAt: undefined,
+          updatedAt: this.now(),
+        });
+        continue;
+      }
+      const now = this.now();
+      const quietHoursEnd = nextAllowedByQuietHours(
+        now,
+        preferences,
+        this.deps.config.timeZone,
+      );
+      if (quietHoursEnd > now) {
+        this.deps.store.updateFollowUp(item.id, {
+          nextReminderAt: quietHoursEnd,
+          updatedAt: now,
+        });
+        continue;
+      }
+      const day = localDayBounds(now, this.deps.config.timeZone);
+      if (
+        this.deps.store.remindersSentBy(item.ownerId, day.start, day.end) >=
+        preferences.dailyReminderLimit
+      ) {
+        this.deps.store.updateFollowUp(item.id, {
+          nextReminderAt: nextAllowedByQuietHours(
+            day.end,
+            preferences,
+            this.deps.config.timeZone,
+          ),
+          updatedAt: now,
+        });
+        continue;
+      }
       const attemptedAt = this.now();
       this.deps.store.updateFollowUp(item.id, {
         reminderAttemptedAt: attemptedAt,
@@ -259,23 +370,37 @@ export class ProactiveController {
       if (
         !claimed ||
         claimed.status !== 'pending' ||
-        claimed.dueAt > this.now() ||
+        claimed.dueAt === undefined ||
+        (claimed.nextReminderAt ?? claimed.dueAt) > this.now() ||
         claimed.reminderAttemptedAt !== attemptedAt
       ) {
         continue;
       }
 
+      const history = claimed.reminderHistory ?? [];
+      const overdue = claimed.reminderSentAt !== undefined;
       const result = await this.deps.channel.send(
         claimed.chatId,
-        { card: reminderCard(claimed, this.deps.config.timeZone) },
+        { card: reminderCard(claimed, this.deps.config.timeZone, overdue) },
         claimed.threadId
           ? { replyTo: claimed.sourceMessageId, replyInThread: true }
           : undefined,
       );
       const sentAt = this.now();
+      const overdueReminderCount =
+        (claimed.overdueReminderCount ?? 0) + (overdue ? 1 : 0);
+      const shouldChase =
+        preferences.overdueReminders &&
+        overdueReminderCount < this.deps.config.overdueReminderMaxCount;
       this.deps.store.updateFollowUp(item.id, {
+        reminderAttemptedAt: undefined,
         reminderSentAt: sentAt,
         reminderMessageId: result.messageId,
+        reminderHistory: [...history, sentAt],
+        overdueReminderCount,
+        nextReminderAt: shouldChase
+          ? sentAt + this.deps.config.overdueReminderIntervalMinutes * 60_000
+          : undefined,
         updatedAt: sentAt,
       });
       await this.deps.store.flush();
@@ -300,12 +425,57 @@ export class ProactiveController {
       ...(msg.threadId ? { threadId: msg.threadId } : {}),
       senderId: msg.senderId,
       ...(msg.senderName ? { senderName: msg.senderName } : {}),
+      mentions: msg.mentions
+        .filter((mention) => !mention.isBot)
+        .map((mention) => ({
+          id: mention.openId ?? mention.userId ?? mention.key,
+          ...(mention.name ? { name: mention.name } : {}),
+        }))
+        .filter((mention) => mention.id !== ''),
       text: msg.content.trim(),
       createTime: msg.createTime,
     };
     this.deps.store.recordMessage(message);
     const now = this.now();
-    let result;
+
+    const preferenceCommand = parsePreferenceCommand(message.text);
+    if (preferenceCommand) {
+      if (!this.canAct()) {
+        this.recordDecision(message, 'settings', 1, 'shadow');
+        return;
+      }
+      const confirmation = this.applyPreferenceCommand(message.senderId, preferenceCommand, now);
+      this.recordDecision(message, 'settings', 1, 'applied');
+      await this.sendTextReply(
+        message.chatId,
+        message.threadId,
+        message.messageId,
+        confirmation,
+        'preferences-updated',
+      );
+      return;
+    }
+
+    if (isDashboardRequest(message.text)) {
+      if (!this.canAct()) {
+        this.recordDecision(message, 'list', 1, 'shadow');
+        return;
+      }
+      this.recordDecision(message, 'list', 1, 'applied');
+      await this.sendDashboard(message);
+      return;
+    }
+
+    const preferences = this.deps.store.preferencesFor(
+      message.senderId,
+      this.deps.config.defaultDailyReminderLimit,
+    );
+    if (!preferences.enabled) {
+      this.recordDecision(message, 'ignore', 1, 'ignored', undefined, 'user-paused');
+      return;
+    }
+
+    let result: DecisionResult;
     try {
       result = await this.deps.decisionProvider.decide({
         message,
@@ -318,7 +488,7 @@ export class ProactiveController {
           )
           .filter((item) => item.messageId !== message.messageId)
           .slice(-this.deps.config.contextMessages),
-        pendingFollowUps: this.deps.store.pendingFollowUps(msg.chatId, msg.threadId),
+        pendingFollowUps: this.deps.store.openFollowUps(msg.chatId, msg.threadId),
         now,
       });
     } catch (err) {
@@ -327,7 +497,19 @@ export class ProactiveController {
       return;
     }
 
-    const pendingFollowUps = this.deps.store.pendingFollowUps(
+    // A clear but incomplete commitment is a reversible confirmation
+    // candidate even when the classifier underrates it as ordinary chat.
+    // It never becomes an active reminder without a user/card confirmation.
+    if (
+      result.action === 'ignore' &&
+      isCommitmentCandidate(message.text) &&
+      (parseExplicitDueAt(message.text, now, this.deps.config.timeZone) === undefined ||
+        soleAssignee(message) !== undefined)
+    ) {
+      result = { ...result, action: 'clarify' };
+    }
+
+    const pendingFollowUps = this.deps.store.openFollowUps(
       message.chatId,
       message.threadId,
     );
@@ -375,8 +557,14 @@ export class ProactiveController {
           ? 'deterministic-low-risk-evidence'
           : undefined),
     );
-    if (result.action === 'create' && target.applied && target.followUpId) {
-      await this.sendRecordedReceipt(target.followUpId);
+    if (
+      (result.action === 'create' || result.action === 'clarify') &&
+      target.applied &&
+      target.followUpId
+    ) {
+      const item = this.deps.store.getFollowUp(target.followUpId);
+      if (item?.status === 'proposed') await this.sendProposal(item);
+      else await this.sendRecordedReceipt(target.followUpId);
     } else if (target.applied && target.followUpId) {
       const item = this.deps.store.getFollowUp(target.followUpId);
       if (item) await this.sendActionConfirmation(item, result.action, message.messageId);
@@ -399,7 +587,7 @@ export class ProactiveController {
     let text: string | undefined;
     if (action === 'complete') text = `✅ 已完成：${item.summary}`;
     else if (action === 'cancel') text = `🚫 已取消跟进：${item.summary}`;
-    else if (action === 'postpone') {
+    else if (action === 'postpone' && item.dueAt !== undefined) {
       text = `⏰ 已延期至 ${formatDueAt(item.dueAt, this.deps.config.timeZone)}：${item.summary}`;
     }
     if (text) await this.sendTextReply(item.chatId, item.threadId, replyTo, text, 'action-confirmed');
@@ -412,7 +600,7 @@ export class ProactiveController {
     event: string,
     reason?: string,
   ): Promise<void> {
-    const pending = this.deps.store.pendingFollowUps(message.chatId, message.threadId);
+    const pending = this.deps.store.openFollowUps(message.chatId, message.threadId);
     const target = selectTarget(message.text, pending);
     const text = feedbackForUnavailableAction(
       action,
@@ -449,6 +637,149 @@ export class ProactiveController {
       log.info('proactive', event, { chatId, threaded: Boolean(threadId) });
     } catch (err) {
       log.warn('proactive', `${event}-failed`, { chatId, err: String(err) });
+    }
+  }
+
+  private applyPreferenceCommand(
+    userId: string,
+    command: PreferenceCommand,
+    now: number,
+  ): string {
+    if (command.kind === 'enabled') {
+      this.deps.store.updatePreferences(
+        userId,
+        { enabled: command.value, updatedAt: now },
+        this.deps.config.defaultDailyReminderLimit,
+      );
+      return command.value ? '✅ 已恢复主动跟进。' : '⏸️ 已暂停你的主动跟进；已有事项会保留，期间不会主动提醒。';
+    }
+    if (command.kind === 'overdue') {
+      this.deps.store.updatePreferences(
+        userId,
+        { overdueReminders: command.value, updatedAt: now },
+        this.deps.config.defaultDailyReminderLimit,
+      );
+      return command.value ? '✅ 已开启逾期追问。' : '✅ 已关闭逾期追问；到期提醒仍会保留。';
+    }
+    if (command.kind === 'daily-limit') {
+      this.deps.store.updatePreferences(
+        userId,
+        { dailyReminderLimit: command.value, updatedAt: now },
+        this.deps.config.defaultDailyReminderLimit,
+      );
+      return `✅ 每日主动提醒上限已设为 ${command.value} 次。`;
+    }
+    this.deps.store.updatePreferences(
+      userId,
+      { quietHours: command.value, updatedAt: now },
+      this.deps.config.defaultDailyReminderLimit,
+    );
+    return command.value
+      ? `✅ 免打扰时段已设为 ${command.value.start}–${command.value.end}。`
+      : '✅ 已取消免打扰时段。';
+  }
+
+  private async sendDashboard(message: ObserverMessage): Promise<void> {
+    const now = this.now();
+    const items = this.deps.store.userFollowUps(message.senderId);
+    const completedSince = now - 7 * DAY_MS;
+    const day = localDayBounds(now, this.deps.config.timeZone);
+    const dueSoonEnd = Math.max(
+      day.end,
+      now + this.deps.config.dueSoonMinutes * 60_000,
+    );
+    const groups = [
+      {
+        title: '待确认',
+        items: items.filter((item) => item.status === 'proposed'),
+      },
+      {
+        title: '已逾期',
+        items: items.filter(
+          (item) => item.status === 'pending' && item.dueAt !== undefined && item.dueAt < now,
+        ),
+      },
+      {
+        title: '今天到期',
+        items: items.filter(
+          (item) =>
+            item.status === 'pending' &&
+            item.dueAt !== undefined &&
+            item.dueAt >= now &&
+            item.dueAt < day.end,
+        ),
+      },
+      {
+        title: '即将到期',
+        items: items.filter(
+          (item) =>
+            item.status === 'pending' &&
+            item.dueAt !== undefined &&
+            item.dueAt >= day.end &&
+            item.dueAt <= dueSoonEnd,
+        ),
+      },
+      {
+        title: '未来',
+        items: items.filter(
+          (item) =>
+            item.status === 'pending' &&
+            item.dueAt !== undefined &&
+            item.dueAt > dueSoonEnd,
+        ),
+      },
+      {
+        title: '最近完成',
+        items: items.filter(
+          (item) => item.status === 'completed' && item.updatedAt >= completedSince,
+        ),
+      },
+      {
+        title: '最近取消',
+        items: items.filter(
+          (item) => item.status === 'cancelled' && item.updatedAt >= completedSince,
+        ),
+      },
+    ];
+    await this.deps.channel.send(
+      message.chatId,
+      { card: dashboardCard(groups, this.deps.config.timeZone) },
+      {
+        replyTo: message.messageId,
+        ...(message.threadId ? { replyInThread: true } : {}),
+      },
+    );
+  }
+
+  private async sendProposal(item: FollowUp): Promise<void> {
+    if (item.receiptAttemptedAt !== undefined) return;
+    const attemptedAt = this.now();
+    this.deps.store.updateFollowUp(item.id, { receiptAttemptedAt: attemptedAt, updatedAt: attemptedAt });
+    await this.deps.store.flush();
+    try {
+      const result = await this.deps.channel.send(
+        item.chatId,
+        {
+          card: proposalCard(
+            item,
+            (item.createdById ?? item.ownerId) !== item.ownerId,
+            this.deps.config.timeZone,
+          ),
+        },
+        {
+          replyTo: item.sourceMessageId,
+          ...(item.threadId ? { replyInThread: true } : {}),
+        },
+      );
+      const sentAt = this.now();
+      this.deps.store.updateFollowUp(item.id, {
+        receiptSentAt: sentAt,
+        receiptMessageId: result.messageId,
+        updatedAt: sentAt,
+      });
+      await this.deps.store.flush();
+    } catch (err) {
+      log.warn('proactive', 'proposal-card-failed', { followUpId: item.id, err: String(err) });
     }
   }
 
@@ -502,7 +833,12 @@ export class ProactiveController {
       content: message.text,
       rawContentType: 'text',
       resources: [],
-      mentions: [],
+      mentions: (message.mentions ?? []).map((mention, index) => ({
+        key: `@_user_${index + 1}`,
+        openId: mention.id,
+        name: mention.name,
+        isBot: false,
+      })),
       mentionAll: false,
       mentionedBot: false,
       createTime: message.createTime,
@@ -515,9 +851,19 @@ export class ProactiveController {
     action: ProactiveAction,
     now: number,
   ): { applied: boolean; followUpId?: string; reason?: string } {
-    if (action === 'create') {
+    if (action === 'create' || action === 'clarify') {
       const dueAt = parseExplicitDueAt(message.text, now, this.deps.config.timeZone);
-      if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
+      if (
+        (action === 'clarify' && !isCommitmentCandidate(message.text)) ||
+        (dueAt === undefined && !isCommitmentCandidate(message.text))
+      ) {
+        return { applied: false, reason: action === 'clarify' ? 'needs-clarification' : 'missing-explicit-due' };
+      }
+      const assignee = soleAssignee(message);
+      const ownerId = assignee?.id ?? message.senderId;
+      const assignedToOther = ownerId !== message.senderId;
+      const status =
+        action === 'clarify' || dueAt === undefined || assignedToOther ? 'proposed' : 'pending';
       const id = `fu_${createHash('sha256')
         .update(`${message.chatId}:${message.messageId}`)
         .digest('hex')
@@ -528,9 +874,15 @@ export class ProactiveController {
         ...(message.threadId ? { threadId: message.threadId } : {}),
         sourceMessageId: message.messageId,
         summary: summarize(message.text),
-        ownerId: message.senderId,
-        dueAt,
-        status: 'pending',
+        createdById: message.senderId,
+        ownerId,
+        ...(dueAt === undefined ? {} : { dueAt }),
+        status,
+        ...(status === 'pending' && dueAt !== undefined
+          ? { nextReminderAt: dueAt, confirmedAt: now }
+          : {}),
+        reminderHistory: [],
+        overdueReminderCount: 0,
         createdAt: now,
         updatedAt: now,
       });
@@ -542,7 +894,7 @@ export class ProactiveController {
     if (action === 'complete' || action === 'cancel' || action === 'postpone') {
       const target = selectTarget(
         message.text,
-        this.deps.store.pendingFollowUps(message.chatId, message.threadId),
+        this.deps.store.openFollowUps(message.chatId, message.threadId),
       );
       if (!target) return { applied: false, reason: 'no-unambiguous-target' };
       if (target.ownerId !== message.senderId) {
@@ -559,10 +911,14 @@ export class ProactiveController {
         const dueAt = parsePostponeDueAt(message.text, now, this.deps.config.timeZone);
         if (dueAt === undefined) return { applied: false, reason: 'missing-explicit-due' };
         this.deps.store.updateFollowUp(target.id, {
+          status: 'pending',
           dueAt,
+          nextReminderAt: dueAt,
+          confirmedAt: target.confirmedAt ?? now,
           reminderAttemptedAt: undefined,
           reminderSentAt: undefined,
           reminderMessageId: undefined,
+          overdueReminderCount: 0,
           updatedAt: now,
           resolutionMessageId: message.messageId,
         });
@@ -579,7 +935,7 @@ export class ProactiveController {
     if (action === 'possible-complex-task') {
       return { applied: false, reason: 'agent-escalation-disabled' };
     }
-    return { applied: false, reason: action === 'clarify' ? 'needs-clarification' : 'no-op' };
+    return { applied: false, reason: 'no-op' };
   }
 
   private isEnabled(): boolean {
@@ -651,20 +1007,22 @@ function confidenceThresholdFor(
   now: number,
   config: ProactiveObserverConfig,
 ): number {
+  const target = selectTarget(message.text, pending);
   switch (action) {
     case 'create':
     case 'clarify':
     case 'possible-complex-task':
+    case 'list':
+    case 'settings':
       return config.lowRiskActionThreshold;
     case 'postpone':
-      return pending.length === 1 &&
-        pending[0]?.ownerId === message.senderId &&
+      return target?.ownerId === message.senderId &&
         hasExplicitPostponeIntent(message.text) &&
         parsePostponeDueAt(message.text, now, config.timeZone) !== undefined
         ? config.lowRiskActionThreshold
         : config.actionThreshold;
     case 'complete':
-      return pending.length === 1 && pending[0]?.ownerId === message.senderId
+      return target?.ownerId === message.senderId
         ? config.lowRiskActionThreshold
         : config.actionThreshold;
     case 'cancel':
@@ -691,13 +1049,16 @@ function hasDeterministicLowRiskEvidence(
   if (action === 'create') {
     return (
       parseExplicitDueAt(message.text, now, config.timeZone) !== undefined &&
-      hasExplicitFollowUpIntent(message.text)
+      isCommitmentCandidate(message.text)
     );
   }
+  if (action === 'clarify') {
+    return isCommitmentCandidate(message.text);
+  }
   if (action === 'postpone') {
+    const target = selectTarget(message.text, pending);
     return (
-      pending.length === 1 &&
-      pending[0]?.ownerId === message.senderId &&
+      target?.ownerId === message.senderId &&
       hasExplicitPostponeIntent(message.text) &&
       parsePostponeDueAt(message.text, now, config.timeZone) !== undefined
     );
@@ -710,9 +1071,20 @@ function hasExplicitFollowUpIntent(text: string): boolean {
   if (/(?:提醒我|通知我|叫我|帮我(?:记得)?提醒|请.{0,24}提醒我)/.test(normalized)) {
     return true;
   }
+  if (/(?:这个|这份|该).{0,32}(?:跟一下|跟进一下|处理一下|确认一下|推进一下)/.test(normalized)) {
+    return true;
+  }
   return /(?:我|我们).{0,48}(?:完成|提交|交付|反馈|跟进|确认|处理|发送|回复|联系|更新|验收|开会|复盘|打电话)/.test(
     normalized,
   );
+}
+
+function isCommitmentCandidate(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '');
+  if (/(?:已经|已完成|完成了|搞定了|做完了|不用了|取消了|已取消)/.test(normalized)) {
+    return false;
+  }
+  return hasExplicitFollowUpIntent(text);
 }
 
 function hasExplicitPostponeIntent(text: string): boolean {
@@ -733,9 +1105,9 @@ function feedbackForUnavailableAction(
   if (reason === 'missing-explicit-due') {
     return action === 'postpone'
       ? '我识别到你想延期，但没读到明确的新时间。可以说“5 分钟后提醒我”或“延期到明天下午 3 点”。'
-      : '我识别到你想设置跟进，但缺少明确时间。可以说“3 分钟后提醒我”或“明天下午 3 点前完成”。';
+      : '我识别到你想设置跟进，但缺少明确时间。可以直接选择今天、明天或下周。';
   }
-  if (reason === 'owner-mismatch') return '这项跟进只能由创建它的人修改。';
+  if (reason === 'owner-mismatch') return '这项跟进只能由负责人修改。';
   if (reason === 'missing-explicit-postpone-intent') {
     return '我没有看到明确的延期指令。如需调整，请说“改到 5 分钟后”或“延期到明天下午 3 点”。';
   }
@@ -746,13 +1118,13 @@ function feedbackForUnavailableAction(
     return '我还不能确定你希望创建、延期、完成还是取消哪项跟进，请补充事项和时间。';
   }
   if (action === 'possible-complex-task') {
-    return '这看起来需要执行型智能体处理；主动跟进 V1 不会自动执行，请 @我明确发起任务。';
+    return '这看起来需要执行型智能体处理；主动跟进 V2 不会自动执行，请 @我明确发起任务。';
   }
   if ((action === 'complete' || action === 'cancel' || action === 'postpone') && !target) {
     return '我没能确定你指的是哪一项跟进，请带上事项名称再说一次。';
   }
   if (target && target.ownerId !== message.senderId) {
-    return '这项跟进只能由创建它的人修改。';
+    return '这项跟进只能由负责人修改。';
   }
   if (
     action === 'postpone' &&
@@ -771,6 +1143,44 @@ function feedbackForUnavailableAction(
   }
   if (action === 'create') {
     return '我还不够确定是否要创建跟进。请明确说“请在具体时间提醒我”。';
+  }
+  return undefined;
+}
+
+function soleAssignee(message: ObserverMessage): { id: string; name?: string } | undefined {
+  const distinct = [...new Map((message.mentions ?? []).map((item) => [item.id, item])).values()];
+  return distinct.length === 1 ? distinct[0] : undefined;
+}
+
+function isDashboardRequest(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '');
+  return /(?:我的(?:主动)?跟进|我的待办|查看.{0,6}(?:跟进|待办)|列出.{0,6}(?:跟进|待办))/.test(normalized);
+}
+
+function parsePreferenceCommand(text: string): PreferenceCommand | undefined {
+  const normalized = text.replace(/\s+/g, '');
+  if (/(?:暂停|关闭|停用)(?:我的)?(?:主动智能体|主动跟进|主动提醒)/.test(normalized)) {
+    return { kind: 'enabled', value: false };
+  }
+  if (/(?:恢复|开启|启用)(?:我的)?(?:主动智能体|主动跟进|主动提醒)/.test(normalized)) {
+    return { kind: 'enabled', value: true };
+  }
+  if (/(?:关闭|不要|停止)逾期(?:追问|提醒)/.test(normalized)) {
+    return { kind: 'overdue', value: false };
+  }
+  if (/(?:开启|恢复|需要)逾期(?:追问|提醒)/.test(normalized)) {
+    return { kind: 'overdue', value: true };
+  }
+  const limit = normalized.match(/每天(?:最多)?提醒(\d{1,2})次/);
+  if (limit?.[1]) {
+    return { kind: 'daily-limit', value: Math.max(1, Math.min(100, Number(limit[1]))) };
+  }
+  if (/(?:取消|关闭)免打扰/.test(normalized)) {
+    return { kind: 'quiet-hours', value: undefined };
+  }
+  if (/免打扰/.test(normalized)) {
+    const quiet = parseQuietHours(text);
+    if (quiet) return { kind: 'quiet-hours', value: quiet };
   }
   return undefined;
 }

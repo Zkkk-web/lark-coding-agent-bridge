@@ -25,6 +25,10 @@ const ACTIVE_CONFIG: ProactiveObserverConfig = {
   contextMessages: 20,
   contextWindowHours: 24,
   pollIntervalMs: 60_000,
+  dueSoonMinutes: 60,
+  overdueReminderIntervalMinutes: 24 * 60,
+  overdueReminderMaxCount: 2,
+  defaultDailyReminderLimit: 5,
 };
 
 class FakeDecisionProvider implements DecisionProvider {
@@ -829,20 +833,277 @@ describe('proactive follow-up controller', () => {
     expect(threads).toEqual(['omt_recent']);
     await controller.stop();
   });
+
+  it('turns an explicit commitment without a deadline into a confirmable proposal', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness([{ action: 'clarify', confidence: 0.31 }], now);
+    harness.controller.enqueue(
+      message('m-proposal', 'oc_intern', '候选人的反馈我来处理', false, now, 'omt_v2'),
+    );
+    await harness.controller.flush();
+
+    const item = harness.store.snapshot().followUps[0]!;
+    expect(item).toMatchObject({ status: 'proposed', ownerId: 'ou_user' });
+    expect(item.dueAt).toBeUndefined();
+    expect(harness.store.snapshot().decisions.at(-1)).toMatchObject({
+      action: 'clarify',
+      outcome: 'applied',
+    });
+    expect(harness.channel.sent[0]).toMatchObject({
+      options: { replyTo: 'm-proposal', replyInThread: true },
+      content: { card: { header: { title: { content: '🗓️ 需要设置跟进时间' } } } },
+    });
+
+    await harness.controller.handleCardAction(
+      { __proactive_follow_up: true, action: 'confirm-tomorrow', followUpId: item.id },
+      'oc_intern',
+      'ou_user',
+      'om_confirm',
+    );
+    expect(harness.store.getFollowUp(item.id)).toMatchObject({
+      status: 'pending',
+      dueAt: Date.parse('2026-10-12T10:00:00.000Z'),
+    });
+    await harness.controller.stop();
+  });
+
+  it('does not silently drop a clear follow-up request when Jev labels it ordinary chat', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness([{ action: 'ignore', confidence: 0.96 }], now);
+    harness.controller.enqueue(
+      message('m-imperative-proposal', 'oc_intern', '这个方案后面跟一下', false, now, 'omt_v2'),
+    );
+    await harness.controller.flush();
+    expect(harness.store.snapshot().followUps[0]).toMatchObject({ status: 'proposed' });
+    expect(harness.store.snapshot().decisions.at(-1)).toMatchObject({
+      action: 'clarify',
+      outcome: 'applied',
+    });
+    await harness.controller.stop();
+  });
+
+  it('requires an explicitly mentioned teammate to accept an assignment', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness([{ action: 'create', confidence: 0.99 }], now);
+    harness.controller.enqueue({
+      ...message('m-assign', 'oc_intern', '@小王 明天下午 3 点前处理候选人反馈', false, now, 'omt_v2'),
+      mentions: [{ key: '@_user_1', openId: 'ou_assignee', name: '小王', isBot: false }],
+    });
+    await harness.controller.flush();
+
+    const item = harness.store.snapshot().followUps[0]!;
+    expect(item).toMatchObject({
+      createdById: 'ou_user',
+      ownerId: 'ou_assignee',
+      status: 'proposed',
+    });
+    await harness.controller.handleCardAction(
+      { __proactive_follow_up: true, action: 'accept', followUpId: item.id },
+      'oc_intern',
+      'ou_user',
+      'om_creator_click',
+    );
+    expect(harness.store.getFollowUp(item.id)?.status).toBe('proposed');
+    await harness.controller.handleCardAction(
+      { __proactive_follow_up: true, action: 'accept', followUpId: item.id },
+      'oc_intern',
+      'ou_assignee',
+      'om_owner_click',
+    );
+    expect(harness.store.getFollowUp(item.id)?.status).toBe('pending');
+    await harness.controller.stop();
+  });
+
+  it('targets one of several topic follow-ups by its name', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness(
+      [
+        { action: 'create', confidence: 0.99 },
+        { action: 'create', confidence: 0.99 },
+        { action: 'complete', confidence: 0.72 },
+      ],
+      now,
+    );
+    harness.controller.enqueue(message('m-one', 'oc_intern', '今天完成候选人反馈', false, now, 'omt_v2'));
+    harness.controller.enqueue(message('m-two', 'oc_intern', '明天完成招聘周报', false, now + 1, 'omt_v2'));
+    harness.controller.enqueue(message('m-one-done', 'oc_intern', '候选人反馈完成了', false, now + 2, 'omt_v2'));
+    await harness.controller.flush();
+
+    expect(harness.store.snapshot().followUps).toMatchObject([
+      { summary: '今天完成候选人反馈', status: 'completed' },
+      { summary: '明天完成招聘周报', status: 'pending' },
+    ]);
+    await harness.controller.stop();
+  });
+
+  it('renders a topic-scoped dashboard with lifecycle groups and source links', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness([], now);
+    harness.store.createFollowUp({
+      id: 'fu_overdue',
+      chatId: 'oc_intern',
+      threadId: 'omt_source',
+      sourceMessageId: 'm_source',
+      summary: '逾期事项',
+      ownerId: 'ou_user',
+      dueAt: now - 1,
+      status: 'pending',
+      createdAt: now - 1_000,
+      updatedAt: now - 1_000,
+    });
+    harness.controller.enqueue(message('m-list', 'oc_intern', '查看我的主动跟进', false, now, 'omt_v2'));
+    await harness.controller.flush();
+
+    expect(harness.provider.calls).toHaveLength(0);
+    expect(harness.channel.sent[0]?.options).toEqual({ replyTo: 'm-list', replyInThread: true });
+    const rendered = JSON.stringify(harness.channel.sent[0]?.content);
+    expect(rendered).toContain('我的主动跟进');
+    expect(rendered).toContain('已逾期');
+    expect(rendered).toContain('open_thread_id=omt_source');
+    await harness.controller.stop();
+  });
+
+  it('applies personal pause, overdue, quiet-hour, and daily-limit controls without Jev', async () => {
+    const now = Date.parse('2026-10-11T02:00:00.000Z');
+    const harness = await createHarness([], now);
+    for (const [index, text] of [
+      '暂停主动跟进',
+      '开启逾期提醒',
+      '每天最多提醒 3 次',
+      '免打扰 22:00-08:00',
+    ].entries()) {
+      harness.controller.enqueue(message(`m-setting-${index}`, 'oc_intern', text, false, now + index, 'omt_v2'));
+    }
+    await harness.controller.flush();
+
+    expect(harness.provider.calls).toHaveLength(0);
+    expect(harness.store.preferencesFor('ou_user')).toMatchObject({
+      enabled: false,
+      overdueReminders: true,
+      dailyReminderLimit: 3,
+      quietHours: { start: '22:00', end: '08:00' },
+    });
+    harness.controller.enqueue(message('m-ignored-paused', 'oc_intern', '明天完成周报', false, now + 10, 'omt_v2'));
+    await harness.controller.flush();
+    expect(harness.store.snapshot().followUps).toHaveLength(0);
+    harness.controller.enqueue(message('m-resume', 'oc_intern', '恢复主动跟进', false, now + 11, 'omt_v2'));
+    await harness.controller.flush();
+    expect(harness.store.preferencesFor('ou_user').enabled).toBe(true);
+    await harness.controller.stop();
+  });
+
+  it('defers reminders during quiet hours', async () => {
+    const clock = { now: Date.parse('2026-10-11T15:00:00.000Z') };
+    const harness = await createHarness([], () => clock.now);
+    harness.store.updatePreferences('ou_user', {
+      quietHours: { start: '22:00', end: '08:00' },
+      updatedAt: clock.now,
+    });
+    harness.store.createFollowUp({
+      id: 'fu_quiet',
+      chatId: 'oc_intern',
+      sourceMessageId: 'm_quiet',
+      summary: '免打扰测试',
+      ownerId: 'ou_user',
+      dueAt: clock.now - 1,
+      status: 'pending',
+      createdAt: clock.now - 1_000,
+      updatedAt: clock.now - 1_000,
+    });
+    await harness.controller.runDueReminders();
+    expect(harness.channel.sent).toHaveLength(0);
+    expect(harness.store.getFollowUp('fu_quiet')?.nextReminderAt).toBe(
+      Date.parse('2026-10-12T00:00:00.000Z'),
+    );
+    await harness.controller.stop();
+  });
+
+  it('sends one due reminder and only the configured number of overdue chases', async () => {
+    const clock = { now: Date.parse('2026-10-11T04:00:00.000Z') };
+    const harness = await createHarness([], () => clock.now, {
+      overdueReminderIntervalMinutes: 1,
+      overdueReminderMaxCount: 2,
+      defaultDailyReminderLimit: 10,
+    });
+    harness.store.createFollowUp({
+      id: 'fu_chase',
+      chatId: 'oc_intern',
+      sourceMessageId: 'm_chase',
+      summary: '逾期追问测试',
+      ownerId: 'ou_user',
+      dueAt: clock.now - 1,
+      status: 'pending',
+      createdAt: clock.now - 1_000,
+      updatedAt: clock.now - 1_000,
+    });
+
+    await harness.controller.runDueReminders();
+    clock.now += 60_000;
+    await harness.controller.runDueReminders();
+    clock.now += 60_000;
+    await harness.controller.runDueReminders();
+    clock.now += 60_000;
+    await harness.controller.runDueReminders();
+
+    expect(harness.channel.sent).toHaveLength(3);
+    expect(JSON.stringify(harness.channel.sent[0]?.content)).toContain('主动跟进提醒');
+    expect(JSON.stringify(harness.channel.sent[1]?.content)).toContain('逾期跟进');
+    expect(harness.store.getFollowUp('fu_chase')).toMatchObject({
+      overdueReminderCount: 2,
+      nextReminderAt: undefined,
+    });
+    await harness.controller.stop();
+  });
+
+  it('enforces the personal daily reminder limit across multiple items', async () => {
+    const clock = { now: Date.parse('2026-10-11T04:00:00.000Z') };
+    const harness = await createHarness([], () => clock.now, {
+      overdueReminderMaxCount: 0,
+      defaultDailyReminderLimit: 1,
+    });
+    for (const id of ['a', 'b']) {
+      harness.store.createFollowUp({
+        id: `fu_limit_${id}`,
+        chatId: 'oc_intern',
+        sourceMessageId: `m_limit_${id}`,
+        summary: `每日上限测试 ${id}`,
+        ownerId: 'ou_user',
+        dueAt: clock.now - 1,
+        status: 'pending',
+        createdAt: clock.now - 1_000,
+        updatedAt: clock.now - 1_000,
+      });
+    }
+    await harness.controller.runDueReminders();
+    expect(harness.channel.sent).toHaveLength(1);
+    expect(harness.store.getFollowUp('fu_limit_b')?.nextReminderAt).toBe(
+      Date.parse('2026-10-11T16:00:00.000Z'),
+    );
+
+    clock.now = Date.parse('2026-10-11T16:00:00.000Z');
+    await harness.controller.runDueReminders();
+    expect(harness.channel.sent).toHaveLength(2);
+    await harness.controller.stop();
+  });
 });
 
-async function createHarness(results: DecisionResult[], now = Date.now()) {
+async function createHarness(
+  results: DecisionResult[],
+  now: number | (() => number) = Date.now(),
+  config: Partial<ProactiveObserverConfig> = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'proactive-controller-'));
   const path = join(dir, 'state.json');
   const store = new ProactiveStore(path);
   const channel = createFakeChannel();
   const provider = new FakeDecisionProvider(results);
+  const clock = typeof now === 'function' ? now : () => now;
   const controller = new ProactiveController({
-    config: ACTIVE_CONFIG,
+    config: { ...ACTIVE_CONFIG, ...config },
     channel: channel as never,
     store,
     decisionProvider: provider,
-    now: () => now,
+    now: clock,
   });
   await controller.load();
   return { controller, store, channel, provider, path };

@@ -47,6 +47,14 @@ export interface ProactiveObserverConfig {
   contextMessages: number;
   contextWindowHours: number;
   pollIntervalMs: number;
+  /** Minutes before a deadline that the dashboard labels an item due soon. */
+  dueSoonMinutes: number;
+  /** Cooldown between successful overdue chases. */
+  overdueReminderIntervalMinutes: number;
+  /** Maximum overdue chases after the first due reminder. */
+  overdueReminderMaxCount: number;
+  /** Default per-user daily scheduled reminder limit. */
+  defaultDailyReminderLimit: number;
 }
 
 export interface SandboxConfig {
@@ -345,6 +353,15 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
     contextMessages: boundedInteger(raw.contextMessages, 20, 1, 100),
     contextWindowHours: boundedInteger(raw.contextWindowHours, 24, 1, 168),
     pollIntervalMs: boundedInteger(raw.pollIntervalMs, 15_000, 1_000, 60 * 60 * 1_000),
+    dueSoonMinutes: boundedInteger(raw.dueSoonMinutes, 60, 1, 7 * 24 * 60),
+    overdueReminderIntervalMinutes: boundedInteger(
+      raw.overdueReminderIntervalMinutes,
+      24 * 60,
+      1,
+      30 * 24 * 60,
+    ),
+    overdueReminderMaxCount: boundedInteger(raw.overdueReminderMaxCount, 2, 0, 20),
+    defaultDailyReminderLimit: boundedInteger(raw.defaultDailyReminderLimit, 5, 1, 100),
   };
 }
 

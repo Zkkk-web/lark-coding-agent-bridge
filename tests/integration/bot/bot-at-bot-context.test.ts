@@ -313,6 +313,10 @@ async function createHarness(options: { proactive?: boolean } = {}): Promise<{
       contextMessages: 20,
       contextWindowHours: 24,
       pollIntervalMs: 60_000,
+      dueSoonMinutes: 60,
+      overdueReminderIntervalMinutes: 24 * 60,
+      overdueReminderMaxCount: 2,
+      defaultDailyReminderLimit: 5,
     };
   }
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));

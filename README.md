@@ -301,7 +301,7 @@ Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). Afte
 
 ### Experimental: proactive follow-up observer
 
-The observer reads non-mention plain-text and text-only rich-post messages in explicitly allowlisted internal chats, uses Jev for structured intent classification, and records follow-ups only when the message contains an explicit due date. A due follow-up is reminded once in its source chat; completion, cancellation, and postponement survive restarts. Non-mention messages never enter Claude, Codex, or Hermes, and the observer does not mutate calendars, tasks, or Base records.
+The observer reads non-mention plain-text and text-only rich-post messages in explicitly allowlisted internal chats and uses Jev for structured intent classification. Explicit deadlines create follow-ups immediately; clear commitments without a deadline create a confirmation card in the source topic. A topic may own multiple independently addressable items. Follow-ups support due reminders, bounded overdue chases, completion, cancellation, and postponement across restarts. `@`-assignments remain proposed until the mentioned owner accepts them. Non-mention messages never enter Claude, Codex, or Hermes, and the observer does not mutate calendars, tasks, or Base records.
 
 Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` event, add the bot to the target chat, and set `TYPESAFE_API_KEY` in the service environment. Then add this field to the matching profile. `allowedChats` is an independent hard boundary and is required. Set `LARK_PROACTIVE_OBSERVER_DISABLED=1` as the process-wide emergency kill switch; it overrides every profile and takes effect after restart:
 
@@ -317,16 +317,20 @@ Enable the Feishu/Lark `im:message.group_msg` scope and `im.message.receive_v1` 
     "shadowThreshold": 0.6,
     "contextMessages": 20,
     "contextWindowHours": 24,
-    "pollIntervalMs": 15000
+    "pollIntervalMs": 15000,
+    "dueSoonMinutes": 60,
+    "overdueReminderIntervalMinutes": 1440,
+    "overdueReminderMaxCount": 2,
+    "defaultDailyReminderLimit": 5
   }
 }
 ```
 
-Start in `shadow` mode and label real chat traffic before switching to `active`. State is stored as `proactive-observer.json` in the profile directory with mode `0600`. The target chat must also remain in the existing `access.allowedChats`; the existing mentioned-message path is unchanged.
+Start in `shadow` mode and label real chat traffic before switching to `active`. State is stored as `proactive-observer.json` in the profile directory with mode `0600`; V1 ledgers migrate in place. The target chat must also remain in the existing `access.allowedChats`; the existing bot-mention path is unchanged. Users can say “查看我的主动跟进”, “暂停主动跟进”, “免打扰 22:00-08:00”, “关闭逾期提醒”, or “每天最多提醒 3 次” in an observed topic to manage their own panel and preferences.
 
-Confidence is risk-tiered rather than governed by one global cutoff. `create`, deterministic owner-authored `postpone`, and owner-authored `complete` for the only pending item in a thread may use `lowRiskActionThreshold`. When Jev selects `create` but underrates a message, a reversible follow-up may still be created only if code can independently verify both a parseable due time and explicit first-person/reminder intent; an explicit time by itself is insufficient. The same deterministic override applies to an owner postponing the only pending item only when the message contains an explicit adjustment phrase (for example, “改到” or “延期”) and a parseable new time, so repeating a commitment cannot silently move its deadline. Text `cancel` remains behind `actionThreshold`; explicit card clicks do not rely on model confidence but remain owner-only. A created follow-up immediately replies with a recorded card, and successful complete/cancel/postpone actions reply with their result in the source thread. Recognized but unsafe or ambiguous actions receive a short explanation instead of failing silently.
+Confidence is risk-tiered rather than governed by one global cutoff. Reversible creation and an owner action with one uniquely identifiable target may use `lowRiskActionThreshold`. Code can independently admit explicit first-person/reminder commitments with a parseable due time, or create a reversible deadline-confirmation proposal when the commitment is clear but the due time is missing. An explicit time by itself is insufficient. Postponement also requires an explicit adjustment phrase (for example, “改到” or “延期”) and a parseable new time, so repeating a commitment cannot silently move its deadline. Text `cancel` remains behind `actionThreshold`; explicit card clicks do not rely on model confidence but remain owner-only. Recognized but unsafe or ambiguous actions receive a short explanation instead of failing silently.
 
-Reminder delivery is deliberately **at most once**. Feishu/Lark message creation does not provide an idempotency key, so the observer persists a delivery claim before sending. If the process loses the response after Feishu accepted the message, a restart will not send a duplicate. The trade-off is that a crash in the narrow claim-before-send window can suppress that reminder; postpone the follow-up to arm a new delivery attempt.
+Each scheduled delivery is deliberately **at most once**. Feishu/Lark message creation does not provide an idempotency key, so the observer persists a delivery claim before sending. A successful delivery may schedule the next bounded overdue chase; an ambiguous transport failure is never retried. Quiet hours, per-user daily limits, pause state, and the overdue-reminder switch are evaluated before every scheduled send.
 
 ## Cloud-doc comments
 
