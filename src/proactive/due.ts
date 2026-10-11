@@ -101,6 +101,38 @@ export function parseExplicitDueAt(
   return undefined;
 }
 
+/**
+ * Parse a new deadline after the model has already classified the message as
+ * a postpone action. In that narrow context users commonly omit “后” and say
+ * “改到 5 分钟吧”. Keeping this separate prevents bare durations in ordinary
+ * chat from creating new follow-ups.
+ */
+export function parsePostponeDueAt(
+  text: string,
+  now: number,
+  timeZone = DEFAULT_PROACTIVE_TIME_ZONE,
+): number | undefined {
+  const explicit = parseExplicitDueAt(text, now, timeZone);
+  if (explicit !== undefined) return explicit;
+
+  const relativeMinutes = text.match(/([一二两三四五六七八九十\d]{1,3})\s*分钟(?:吧|左右)?/);
+  if (relativeMinutes?.[1]) {
+    const minutes = parseCount(relativeMinutes[1]);
+    if (minutes !== undefined) return now + minutes * 60 * 1_000;
+  }
+
+  if (/半\s*(?:个)?小时(?:吧|左右)?/.test(text)) return now + 30 * 60 * 1_000;
+  const relativeHours = text.match(
+    /([一二两三四五六七八九十\d]{1,3})\s*(?:个)?小时(?:吧|左右)?/,
+  );
+  if (relativeHours?.[1]) {
+    const hours = parseCount(relativeHours[1]);
+    if (hours !== undefined) return now + hours * 60 * 60 * 1_000;
+  }
+
+  return undefined;
+}
+
 function addCalendarDays(date: CalendarDate, days: number): CalendarDate {
   const shifted = new Date(Date.UTC(date.year, date.month - 1, date.day + days));
   return {

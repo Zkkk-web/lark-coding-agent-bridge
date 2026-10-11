@@ -78,6 +78,7 @@ describe('profile schema', () => {
     const defaults = createDefaultProfileConfig({ agentKind: 'claude', accounts: { app } });
     expect(defaults.proactiveObserver.timeZone).toBe('Asia/Shanghai');
     expect(defaults.proactiveObserver.lowRiskActionThreshold).toBe(0.6);
+    expect(defaults.proactiveObserver.pollIntervalMs).toBe(15_000);
 
     const configured = normalizeProfileConfig({
       schemaVersion: 2,

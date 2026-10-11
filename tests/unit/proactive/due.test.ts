@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { formatDueAt, parseExplicitDueAt } from '../../../src/proactive/due';
+import {
+  formatDueAt,
+  parseExplicitDueAt,
+  parsePostponeDueAt,
+} from '../../../src/proactive/due';
 
 describe('explicit due parser', () => {
   const timeZone = 'Asia/Shanghai';
@@ -28,6 +32,13 @@ describe('explicit due parser', () => {
     expect(parseExplicitDueAt('2 个小时后跟进候选人', now, timeZone)).toBe(
       now + 2 * 60 * 60 * 1_000,
     );
+  });
+
+  it('accepts a bare relative duration only for an already-classified postpone action', () => {
+    expect(parseExplicitDueAt('改到 5 分钟吧', now, timeZone)).toBeUndefined();
+    expect(parsePostponeDueAt('改到 5 分钟吧', now, timeZone)).toBe(now + 5 * 60_000);
+    expect(parsePostponeDueAt('延后半小时', now, timeZone)).toBe(now + 30 * 60_000);
+    expect(parsePostponeDueAt('推迟两个小时', now, timeZone)).toBe(now + 2 * 60 * 60_000);
   });
 
   it('parses explicit clock times in the configured zone rather than the host timezone', () => {

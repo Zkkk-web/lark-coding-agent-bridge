@@ -40,7 +40,7 @@ export interface ProactiveObserverConfig {
   allowedChats: string[];
   /** Decisions at or above this confidence may mutate follow-up state in active mode. */
   actionThreshold: number;
-  /** Low-risk create/postpone decisions may act at this confidence when deterministic guards pass. */
+  /** Low-risk create/postpone/complete decisions may act here when deterministic guards pass. */
   lowRiskActionThreshold: number;
   /** Decisions below this confidence are ignored instead of retained as shadow candidates. */
   shadowThreshold: number;
@@ -344,7 +344,7 @@ function normalizeProactiveObserver(input: unknown): ProactiveObserverConfig {
     shadowThreshold,
     contextMessages: boundedInteger(raw.contextMessages, 20, 1, 100),
     contextWindowHours: boundedInteger(raw.contextWindowHours, 24, 1, 168),
-    pollIntervalMs: boundedInteger(raw.pollIntervalMs, 60_000, 1_000, 60 * 60 * 1_000),
+    pollIntervalMs: boundedInteger(raw.pollIntervalMs, 15_000, 1_000, 60 * 60 * 1_000),
   };
 }
 
