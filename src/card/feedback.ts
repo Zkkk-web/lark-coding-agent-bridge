@@ -1,6 +1,6 @@
 import type { CardActionResponse } from '@larksuite/channel';
 
-export function cardFeedback(content: string, type: 'success' | 'info' | 'warning' | 'error' = 'info'): CardActionResponse {
+export function cardFeedback(content: string, type: 'success' | 'info' | 'warning' | 'error' = 'info'): CardActionResponse & { toast: { content: string; type: string } } {
   return { toast: { type, content } };
 }
 

@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ProactiveObserverConfig } from '../../../src/config/profile-schema';
+import type { LarkChannel } from '@larksuite/channel';
+import { RunRejected } from '../../../src/runtime/errors';
 import { ProactiveTaskController, type TaskRuntime } from '../../../src/proactive/task-controller';
 import { taskCard, TASK_CARD_MARKER } from '../../../src/proactive/task-cards';
 import { ProactiveStore } from '../../../src/proactive/store';
@@ -23,7 +25,7 @@ function message(text = '请帮我起草一份实习群试点方案', overrides:
 async function harness(options: { active?: boolean; enabled?: boolean; runtime?: Partial<TaskRuntime> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'proactive-task-'));
   const store = new ProactiveStore(join(dir, 'state.json'));
-  const channel = { send: vi.fn(async () => ({ messageId: 'card' })), updateCard: vi.fn(async () => undefined) };
+  const channel = { send: vi.fn<LarkChannel['send']>(async () => ({ messageId: 'card' })), updateCard: vi.fn(async () => undefined) };
   const run = vi.fn<TaskRuntime['run']>(options.runtime?.run ?? (async () => ({ status: 'ready', draft })));
   const publish = vi.fn<TaskRuntime['publish']>(options.runtime?.publish ?? (async (_t, _s, created) => {
     await created('doc123', 'https://www.feishu.cn/docx/doc123');
@@ -38,10 +40,149 @@ async function harness(options: { active?: boolean; enabled?: boolean; runtime?:
   const task = () => store.snapshot().tasks[0]!;
   const click = (action: string, overrides: Record<string, unknown> = {}, owner = 'owner', chat = 'chat', card = 'card') =>
     controller.handleCard({ [TASK_CARD_MARKER]: true, taskId: task().id, revision: task().revision, action, ...overrides }, chat, owner, card);
-  return { controller, store, channel, run, publish, offer, task, click, cfg, setActive: (v: boolean) => { active = v; } };
+  return { controller, store, channel, run, publish, offer, task, click, cfg, dir, setActive: (v: boolean) => { active = v; } };
 }
 
 describe('confirmed proactive execution', () => {
+  it('does not intercept a reminder-only completion or commands from another topic/owner', async () => {
+    const h = await harness(); await h.offer();
+    expect(await h.controller.handleMessage(message('这个完成了'))).toBe(false);
+    expect(await h.controller.handleMessage(message('开始吧', { senderId: 'other' }))).toBe(false);
+    expect(await h.controller.handleMessage(message('开始吧', { threadId: 'other' }))).toBe(false);
+    expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it('does not use an old recovered approval to start a newer revision', async () => {
+    const h = await harness(); await h.offer();
+    h.store.updateTask(h.task().id, { revision: 2, approvalRequestedAt: now + 1000 });
+    await h.controller.handleMessage(message(`开始 ${h.task().id}`));
+    expect(h.run).not.toHaveBeenCalled(); expect(h.task().status).toBe('proposed');
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('早于');
+  });
+
+  it('requires an explicit task id to revise an accepted artifact and preserves its history', async () => {
+    const h = await harness(); await h.offer(); await h.click('start'); await h.controller.waitForIdle(); await h.click('accept');
+    expect(await h.controller.handleMessage(message('精简一点'))).toBe(false);
+    await h.controller.handleMessage(message(`补充 ${h.task().id}：精简一点`));
+    expect(h.task()).toMatchObject({ status: 'proposed', revision: 2, confirmedAt: undefined, documentUrl: undefined });
+    expect(h.task().artifacts).toHaveLength(1); expect(h.publish).toHaveBeenCalledOnce();
+  });
+
+  it('shows a busy explanation without claiming another task is queued', async () => {
+    const h = await harness({ runtime: { run: async (_task, signal) => new Promise(resolve => signal.addEventListener('abort', () => resolve({ status: 'needs_input', question: '停止' }), { once: true })) } });
+    await h.offer(); await h.click('start');
+    const second = { ...h.task(), id: 'pt_aaaaaaaaaaaa', status: 'proposed' as const, kind: 'research' as const };
+    h.store.createTask(second);
+    await h.controller.handleMessage(message(`开始 ${second.id}`));
+    expect(h.store.getTask(second.id)).toMatchObject({ status: 'proposed', progress: expect.stringContaining('未排队') });
+    expect(h.run).toHaveBeenCalledOnce(); await h.controller.stop();
+  });
+
+  it('explains executor pool rejection in Chinese', async () => {
+    const h = await harness({ runtime: { run: async () => { throw new RunRejected('pool-full', 'pool full'); } } });
+    await h.offer(); await h.click('start'); await h.controller.waitForIdle();
+    expect(h.task()).toMatchObject({ status: 'failed', error: expect.stringContaining('执行资源正忙') });
+    expect(h.publish).not.toHaveBeenCalled();
+  });
+
+  it('persists card synchronization failures and exposes them on the overview', async () => {
+    const h = await harness(); await h.offer();
+    h.channel.updateCard.mockRejectedValue(new Error('permission denied'));
+    await h.click('adjust'); expect(h.task().cardSyncError).toContain('同步失败');
+    await h.controller.handleMessage(message('我的主动任务'));
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('原任务卡同步失败');
+    h.channel.updateCard.mockResolvedValue(undefined);
+    await h.controller.handleMessage(message(`补充 ${h.task().id}：请给新人阅读`));
+    expect(h.task().cardSyncError).toBeUndefined();
+  });
+
+  it('does not duplicate an overview after an ambiguous initial send', async () => {
+    const h = await harness(); await h.offer();
+    h.channel.send.mockRejectedValueOnce(new Error('network timeout'));
+    await h.controller.handleMessage(message('我的主动任务'));
+    const cards = () => h.channel.send.mock.calls.filter(c => 'card' in c[1]);
+    expect(cards()).toHaveLength(2);
+    await h.controller.handleMessage(message('我的主动任务'));
+    expect(cards()).toHaveLength(2); expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('未新建卡片');
+  });
+
+  it('paginates overview and synchronizes its existing card after a state transition', async () => {
+    const h = await harness(); await h.offer();
+    for (let i = 1; i <= 4; i++) h.store.createTask({ ...h.task(), id: `pt_${String(i).padStart(12, '0')}`, request: `任务${i}`, updatedAt: now - i });
+    await h.controller.handleMessage(message('我的主动任务 第2页'));
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('第 2/2 页');
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('任务4');
+    await h.controller.handleMessage(message('我的主动任务 第1页'));
+    await h.click('adjust');
+    expect(JSON.stringify(h.channel.updateCard.mock.lastCall)).toContain('需要补充信息');
+    expect(h.store.snapshot().taskDashboards).toHaveLength(1);
+  });
+  it.each(['开始吧', '开始整理吧！', '整理', '可以开始了'])('starts the only applicable proposal via %s, not an older delivered task', async (text) => {
+    const h = await harness(); await h.offer();
+    h.store.createTask({ ...h.task(), id: 'pt_aaaaaaaaaaaa', status: 'delivered', kind: 'research' });
+    await h.controller.handleMessage(message(text)); await h.controller.waitForIdle();
+    expect(h.run).toHaveBeenCalledTimes(1); expect(h.task().status).toBe('delivered');
+    expect(h.channel.send.mock.calls.some((c) => JSON.stringify(c).includes('已开始'))).toBe(true);
+  });
+
+  it.each(['好', '行', '可以', '不要开始', '他说开始吧', '开始吧然后帮我删文件'])('does not infer task approval from %s', async (text) => {
+    const h = await harness(); await h.offer();
+    expect(await h.controller.handleMessage(message(text))).toBe(false);
+    expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it('lists choices instead of guessing between two startable proposals', async () => {
+    const h = await harness(); await h.offer();
+    h.store.createTask({ ...h.task(), id: 'pt_aaaaaaaaaaaa', kind: 'research' });
+    await h.controller.handleMessage(message('开始吧'));
+    expect(h.run).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('pt_aaaaaaaaaaaa');
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('有多个');
+  });
+
+  it('does not steal a vague completion when a reminder is also open', async () => {
+    const h = await harness(); await h.offer(); h.store.updateTask(h.task().id, { status: 'delivered' });
+    h.store.createFollowUp({ id: 'fu_open', chatId: 'chat', threadId: 'thread', ownerId: 'owner', sourceMessageId: 'f', summary: '开会', status: 'pending', dueAt: now + 1, createdAt: now, updatedAt: now });
+    expect(await h.controller.handleMessage(message('这个完成了'))).toBe(true);
+    expect(h.task().status).toBe('delivered'); expect(h.store.getFollowUp('fu_open')?.status).toBe('pending');
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('提醒');
+  });
+
+  it('accepts a unique delivered task and replies in the same topic', async () => {
+    const h = await harness(); await h.offer(); h.store.updateTask(h.task().id, { status: 'delivered' });
+    await h.controller.handleMessage(message('这个完成了'));
+    expect(h.task().status).toBe('accepted');
+    expect(h.channel.send).toHaveBeenLastCalledWith('chat', { text: expect.stringContaining('验收完成') }, { replyTo: 'source', replyInThread: true });
+  });
+
+  it('turns a natural revision into a new unconfirmed version', async () => {
+    const h = await harness(); await h.offer(); h.store.updateTask(h.task().id, { status: 'delivered', confirmedAt: now });
+    await h.controller.handleMessage(message('精简一点，把问题放前面'));
+    expect(h.task()).toMatchObject({ status: 'proposed', revision: 2, confirmedAt: undefined });
+    expect(h.task().request).toContain('精简一点，把问题放前面'); expect(h.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps paused text operations visible but read-only', async () => {
+    const h = await harness(); await h.offer(); h.store.updatePreferences('owner', { enabled: false });
+    await h.controller.handleMessage(message('开始吧'));
+    expect(h.task().status).toBe('proposed'); expect(h.run).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.channel.send.mock.lastCall)).toContain('暂停');
+  });
+
+  it('refreshes one persistent overview card, scoped to owner/topic and without running work', async () => {
+    const h = await harness(); await h.offer();
+    h.store.createTask({ ...h.task(), id: 'foreign', ownerId: 'other', request: 'PRIVATE' });
+    await h.controller.handleMessage(message('我的主动任务'));
+    const first = JSON.stringify(h.channel.send.mock.lastCall);
+    expect(first).toContain('我的主动任务'); expect(first).toContain('待确认'); expect(first).not.toContain('PRIVATE');
+    expect(first).toContain('open_thread_id');
+    const count = h.channel.send.mock.calls.filter(c => 'card' in c[1]).length;
+    await h.controller.handleMessage(message('任务进度'));
+    expect(h.channel.send.mock.calls.filter(c => 'card' in c[1])).toHaveLength(count);
+    const reloaded = new ProactiveStore(join(h.dir, 'state.json')); await reloaded.load();
+    expect(reloaded.snapshot().taskDashboards).toHaveLength(1);
+    expect(h.run).not.toHaveBeenCalled();
+  });
   it.each([
     '我想要份实习生周报模板，包含本周完成的工作、遇到的问题、下周计划三个部分，每部分给一个填写示例，生成飞书文档。',
     '给我做个周报模板',

@@ -97,6 +97,7 @@ export interface ProactiveState {
   followUps: FollowUp[];
   preferences: ProactiveUserPreferences[];
   tasks: ProactiveTask[];
+  taskDashboards?: TaskDashboard[];
   processedMessageIds: string[];
 }
 
@@ -141,6 +142,7 @@ export interface ProactiveTask {
   status: ProactiveTaskStatus;
   createdAt: number;
   updatedAt: number;
+  approvalRequestedAt?: number;
   confirmedAt?: number;
   confirmedBy?: string;
   cardMessageId?: string;
@@ -154,6 +156,18 @@ export interface ProactiveTask {
   publicationAttemptedAt?: number;
   artifacts: Array<{ revision: number; url: string; title: string }>;
   reviewFollowUpId?: string;
+  reviewReminderAt?: number;
+  cardSyncError?: string;
+}
+
+export interface TaskDashboard {
+  chatId: string;
+  threadId?: string;
+  ownerId: string;
+  sourceMessageId: string;
+  messageId?: string;
+  attemptedAt: number;
+  page: number;
 }
 
 export interface DecisionProvider {

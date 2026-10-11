@@ -70,6 +70,7 @@ import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import { ProactiveController } from '../proactive/controller';
+import { proactiveChannel } from '../proactive/channel';
 import { JevDecisionProvider } from '../proactive/decision';
 import { createLarkProactiveHistorySource } from '../proactive/history';
 import { isProactiveObserverGloballyDisabled } from '../proactive/kill-switch';
@@ -300,7 +301,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       try {
         proactiveObserver = new ProactiveController({
           config: controls.profileConfig.proactiveObserver,
-          channel,
+          channel: proactiveChannel(channel),
           store: new ProactiveStore(deps.appPaths.proactiveObserverFile),
           decisionProvider: deps.proactiveDecisionProvider ?? new JevDecisionProvider(),
           historySource: createLarkProactiveHistorySource(channel),

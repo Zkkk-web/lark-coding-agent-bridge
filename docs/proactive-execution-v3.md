@@ -2,6 +2,8 @@
 
 Tracking: upstream issue #321; additive to V2 (#320). Default off, no automatic merge.
 
+Follow-on: [V3.1 contextual controls and visible status](proactive-conversation-v31.md) (#323).
+
 ## Product boundary
 
 The existing V2 reminder ledger stays separate from the task ledger. A need for summary, public research or document drafting can produce a proposal; it is not authorization to execute. Only the source author can start, change or accept that task. A card callback binds task ID, revision, chat, author and card message ID. Text commands bind author, chat and topic and require an ID when ambiguous. Changed requirements create a new revision and invalidate previous approval. Confirmations are persisted before starting the worker.
@@ -12,7 +14,7 @@ Jev returns both an action and a structured document kind (summary/research/draf
 
 ## State and failure behavior
 
-States: proposed → running → publishing → delivered → accepted. Missing information enters needs_input; supplementation returns to proposed at a new revision. Cancellation and failures are explicit terminal states for that attempt. Revisions preserve the earlier artifact list and draft, and create a new document rather than overwriting the accepted source. A review reminder reuses V2's bounded scheduler and is cancelled on acceptance or revision.
+States: proposed → running → publishing → delivered → accepted. Missing information enters needs_input; supplementation returns to proposed at a new revision. Cancellation and failures are explicit terminal states for that attempt. Revisions preserve the earlier artifact list, and create a new document rather than overwriting the accepted source. A review reminder reuses V2's bounded scheduler and is cancelled on acceptance or revision.
 
 State schema 3 adds tasks without removing V1/V2 reminders, preferences or message deduplication. Startup marks interrupted running/publishing tasks failed, without replaying model execution or document creation. The pre-publication claim and returned document ID are persisted. An uncertain create/write/permission result never becomes delivered and is not automatically retried. This can leave a partial private document; operators use the recorded ID to inspect it. No automatic deletion is attempted.
 

@@ -41,6 +41,32 @@ class FakeDecisionProvider implements DecisionProvider {
 }
 
 describe('proactive follow-up controller', () => {
+  it('routes contextual approval and acceptance before Jev, and deduplicates repeated message delivery', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'proactive-v31-routing-'));
+    const store = new ProactiveStore(join(dir, 'state.json'));
+    const fake = createFakeChannel(); const now = Date.now();
+    const decide = vi.fn(async () => ({ action: 'possible-complex-task' as const, confidence: .99, taskKind: 'draft' as const }));
+    const run = vi.fn(async () => ({ status: 'ready' as const, draft: { title: '测试', content: '真实任务正文', sources: [] } }));
+    const publish = vi.fn(async () => 'https://www.feishu.cn/docx/test');
+    const controller = new ProactiveController({
+      config: { ...ACTIVE_CONFIG, execution: { enabled: true, maxRuntimeMs: 30000, dailyProposalLimit: 3, proposalCooldownMinutes: 0 } },
+      store, channel: { send: fake.send, updateCard: async () => {} } as never,
+      now: () => now, decisionProvider: { decide }, taskRuntime: { run, publish },
+    });
+    await controller.load();
+    controller.enqueue(message('proposal', 'oc_intern', '请帮我起草验收文档', false, now, 'topic'));
+    await controller.flush();
+    const start = message('start', 'oc_intern', '开始吧', false, now + 1, 'topic');
+    controller.enqueue(start); controller.enqueue(start);
+    await controller.flush(); await controller.tasks!.waitForIdle();
+    expect(run).toHaveBeenCalledOnce(); expect(publish).toHaveBeenCalledOnce();
+    controller.enqueue(message('accept', 'oc_intern', '这个完成了', false, now + 2, 'topic'));
+    await controller.flush();
+    expect(store.snapshot().tasks[0]!.status).toBe('accepted');
+    expect(decide).toHaveBeenCalledOnce(); expect(store.snapshot().followUps).toHaveLength(0);
+    for (const item of fake.sent) expect(item.options).toMatchObject({ replyInThread: true });
+    await controller.stop();
+  });
   it('routes a semantic document request to a confirmation card instead of legacy escalation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'proactive-v3-natural-'));
     const store = new ProactiveStore(join(dir, 'state.json'));

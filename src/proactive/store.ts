@@ -8,6 +8,7 @@ import type {
   ProactiveState,
   ProactiveUserPreferences,
   ProactiveTask,
+  TaskDashboard,
 } from './types';
 
 const EMPTY_STATE: ProactiveState = {
@@ -45,6 +46,7 @@ export class ProactiveStore {
           ? raw.preferences.filter(validPreferences)
           : [],
         tasks: Array.isArray(raw.tasks) ? raw.tasks.filter(validTask) : [],
+        taskDashboards: Array.isArray(raw.taskDashboards) ? raw.taskDashboards.filter(validDashboard) : [],
         processedMessageIds: Array.isArray(raw.processedMessageIds)
           ? raw.processedMessageIds.filter((id): id is string => typeof id === 'string')
           : [],
@@ -219,6 +221,18 @@ export class ProactiveStore {
     return task;
   }
 
+  taskDashboard(chatId: string, ownerId: string, threadId?: string): TaskDashboard | undefined {
+    return this.state.taskDashboards?.find(d => d.chatId === chatId && d.ownerId === ownerId && d.threadId === threadId);
+  }
+
+  saveTaskDashboard(dashboard: TaskDashboard): void {
+    const entries = this.state.taskDashboards ??= [];
+    const existing = this.taskDashboard(dashboard.chatId, dashboard.ownerId, dashboard.threadId);
+    if (existing) Object.assign(existing, dashboard);
+    else entries.push(dashboard);
+    this.persist();
+  }
+
   async flush(): Promise<void> {
     await this.saving;
     if (this.saveError) throw this.saveError;
@@ -254,6 +268,14 @@ function validTask(value: unknown): value is ProactiveTask {
     Number.isInteger(task.revision) && Number.isFinite(task.createdAt) &&
     Number.isFinite(task.updatedAt) && Array.isArray(task.artifacts) &&
     Array.isArray(task.context) && task.context.every(validMessage));
+}
+
+function validDashboard(value: unknown): value is TaskDashboard {
+  const d = value as Partial<TaskDashboard> | undefined;
+  return Boolean(d && typeof d.chatId === 'string' && typeof d.ownerId === 'string' &&
+    typeof d.sourceMessageId === 'string' && (d.threadId === undefined || typeof d.threadId === 'string') &&
+    (d.messageId === undefined || typeof d.messageId === 'string') && Number.isFinite(d.attemptedAt) &&
+    Number.isInteger(d.page) && d.page! >= 1);
 }
 
 function validMessage(value: unknown): value is ObserverMessage {
