@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -79,6 +79,7 @@ describe('proactive store', () => {
         },
       ],
     });
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ version: 2, preferences: [] });
   });
 });
 

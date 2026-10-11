@@ -46,6 +46,10 @@ export class ProactiveStore {
           ? raw.processedMessageIds.filter((id): id is string => typeof id === 'string')
           : [],
       };
+      if (raw.version !== 2 || !Array.isArray(raw.preferences)) {
+        this.persist();
+        await this.flush();
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw err;
