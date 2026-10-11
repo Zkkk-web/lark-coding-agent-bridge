@@ -80,7 +80,8 @@ describe('confirmed proactive execution', () => {
     await h.offer(); await h.offer(message(undefined, { messageId: 'duplicate' }));
     await h.click('cancel');
     await h.offer(message('请帮我调研新的协作工具', { messageId: 'second' }));
-    expect(h.channel.send).toHaveBeenCalledTimes(1);
+    expect(h.channel.send).toHaveBeenCalledTimes(3);
+    expect(h.store.snapshot().tasks).toHaveLength(1);
   });
 
   it('does not suggest during quiet hours or when paused by the owner', async () => {

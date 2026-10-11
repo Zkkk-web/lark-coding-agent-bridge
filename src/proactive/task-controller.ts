@@ -68,12 +68,26 @@ export class ProactiveTaskController {
     if (!prefs.enabled || nextAllowedByQuietHours(now, prefs, this.deps.config.timeZone) > now) return true;
     const fingerprint = taskFingerprint(message.text, kind);
     const existing = this.deps.store.tasksFor(message.chatId, message.senderId, message.threadId);
-    if (existing.some((task) => task.fingerprint === fingerprint && now - task.createdAt < DAY_MS)) return true;
-    if (existing.some((task) => ['proposed', 'needs_input', 'running', 'publishing'].includes(task.status) && task.kind === kind)) return true;
+    const duplicate = existing.find((task) => task.fingerprint === fingerprint && now - task.createdAt < DAY_MS);
+    if (duplicate) {
+      if (hasExplicitHelpIntent(message.text)) await this.reply(message, `这条需求已有任务 ${duplicate.id}，不会重复创建。可发送“我的主动任务”查看状态。`);
+      return true;
+    }
+    const open = existing.find((task) => ['proposed', 'needs_input', 'running', 'publishing'].includes(task.status) && task.kind === kind);
+    if (open) {
+      if (hasExplicitHelpIntent(message.text)) await this.reply(message, `本话题已有同类任务 ${open.id} 待处理。可先完成它，或回复“补充 ${open.id}：你的要求”后重新确认。`);
+      return true;
+    }
     const day = localDayBounds(now, this.deps.config.timeZone);
     const all = this.deps.store.snapshot().tasks.filter((task) => task.ownerId === message.senderId);
-    if (all.filter((task) => task.createdAt >= day.start).length >= this.deps.config.execution!.dailyProposalLimit) return true;
-    if (existing.some((task) => now - task.createdAt < this.deps.config.execution!.proposalCooldownMinutes * 60_000)) return true;
+    if (all.filter((task) => task.createdAt >= day.start).length >= this.deps.config.execution!.dailyProposalLimit) {
+      if (hasExplicitHelpIntent(message.text)) await this.reply(message, `今天的主动任务建议已达到 ${this.deps.config.execution!.dailyProposalLimit} 条上限，本次没有新建任务。已有任务仍可确认、修改或验收。`);
+      return true;
+    }
+    if (existing.some((task) => now - task.createdAt < this.deps.config.execution!.proposalCooldownMinutes * 60_000)) {
+      if (hasExplicitHelpIntent(message.text)) await this.reply(message, `为减少打扰，同一话题的任务建议间隔为 ${this.deps.config.execution!.proposalCooldownMinutes} 分钟。本次没有新建，请稍后再发；已有任务仍可操作。`);
+      return true;
+    }
     const context = this.deps.store.recentMessages(message.chatId, now - DAY_MS, 20, message.threadId);
     const task: ProactiveTask = {
       id: `pt_${createHash('sha256').update(`${message.chatId}:${message.messageId}`).digest('hex').slice(0, 12)}`,
