@@ -28,6 +28,17 @@ Manual reconnect and the independent connection-liveness watchdog are unchanged.
 Active task/run checks remain in place. This prevents an immediate recovery /
 reconnect loop, but does not repair another consumer acknowledging our events.
 
+## Slow native card callbacks
+
+The callback returns a provisional receipt after 1.5 seconds to stay within
+the platform deadline. The eventual result must not be discarded by the
+`Promise.race`: when it contains a card, send the complete authorized payload
+through the delayed card-update API with the original callback token. Check
+the API business code and report failure without logging the token. Fast
+callbacks still return their card directly; toast-only results do not create
+another message. This fixes a confirmed late-result loss in the application,
+independently of whether every callback is delivered to this receiver.
+
 ## Live acceptance
 
 Use an existing approved test topic, one test task, and the real initiating user.

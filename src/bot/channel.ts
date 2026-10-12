@@ -17,6 +17,7 @@ import {
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
 import { respondToCardAction } from '../card/feedback';
+import { deliverLateCardResponse } from '../card/late-response';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
@@ -450,7 +451,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
           proactiveObserver,
         });
-      }), (err) => log.fail('cardAction', err, { chatId: evt.chatId, msgId: evt.messageId }));
+      }), (err) => log.fail('cardAction', err, { chatId: evt.chatId, msgId: evt.messageId }), async (response) => {
+        await deliverLateCardResponse(channel.rawClient, evt, response);
+        log.info('cardAction', 'late-response-delivered', { chatId: evt.chatId, msgId: evt.messageId });
+      });
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
