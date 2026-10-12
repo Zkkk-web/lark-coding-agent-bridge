@@ -41,6 +41,60 @@ class FakeDecisionProvider implements DecisionProvider {
 }
 
 describe('proactive follow-up controller', () => {
+  it.each(['好的', '收到，谢谢', '哈哈哈', '👍'])('keeps acknowledgements quiet without calling the judge: %s', async text => {
+    const h = await createHarness([{ action: 'clarify', confidence: .99 }]);
+    h.controller.enqueue(message('ack', 'oc_intern', text)); await h.controller.flush();
+    expect(h.provider.calls).toHaveLength(0); expect(h.channel.sent).toHaveLength(0);
+    expect(h.store.snapshot().followUps).toHaveLength(0); await h.controller.stop();
+  });
+
+  it.each(['这个是什么意思？', '我该怎么处理这个问题？', '我正在处理反馈', '如果我明天完成报告呢？'])('does not turn conversation into an unsolicited clarification: %s', async text => {
+    const h = await createHarness([{ action: 'clarify', confidence: .99 }]);
+    h.controller.enqueue(message('chat', 'oc_intern', text)); await h.controller.flush();
+    expect(h.channel.sent).toHaveLength(0); expect(h.store.snapshot().followUps).toHaveLength(0);
+    await h.controller.stop();
+  });
+
+  it('replies to top-level reminders in a thread and keeps later topic controls bound', async () => {
+    const now = Date.now(); const store = new ProactiveStore(join(await mkdtemp(join(tmpdir(), 'quiet-thread-')), 'state.json'));
+    const channel = createFakeChannel(); const resolve = vi.fn(async () => 'new-topic');
+    const controller = new ProactiveController({ config: ACTIVE_CONFIG, store, channel: channel as never, now: () => now,
+      resolveTaskThread: resolve, decisionProvider: new FakeDecisionProvider([{ action: 'create', confidence: .99 }, { action: 'complete', confidence: .99 }]) });
+    await controller.load(); controller.enqueue(message('root', 'oc_intern', '3 分钟后提醒我开会', false, now)); await controller.flush();
+    expect(channel.sent[0]?.options).toEqual({ replyTo: 'root', replyInThread: true });
+    expect(store.snapshot().followUps[0]?.threadId).toBe('new-topic');
+    controller.enqueue(message('done', 'oc_intern', '这个完成了', false, now + 1, 'new-topic')); await controller.flush();
+    expect(store.snapshot().followUps[0]?.status).toBe('completed'); await controller.stop();
+  });
+
+  it('keeps due reminders for legacy top-level items inside the source thread', async () => {
+    const now = Date.now(); const h = await createHarness([], now);
+    h.store.createFollowUp({ id: 'legacy', chatId: 'oc_intern', sourceMessageId: 'root', summary: '验收', ownerId: 'ou_user',
+      dueAt: now - 1, status: 'pending', createdAt: now - 1000, updatedAt: now - 1000 });
+    await h.controller.runDueReminders();
+    expect(h.channel.sent[0]?.options).toEqual({ replyTo: 'root', replyInThread: true }); await h.controller.stop();
+  });
+
+  it('does not clarify unrelated chat just because an open follow-up exists', async () => {
+    const now = Date.now(); const h = await createHarness([{ action: 'clarify', confidence: .99 }], now);
+    h.store.createFollowUp({ id: 'open', chatId: 'oc_intern', sourceMessageId: 'root', summary: '验收', ownerId: 'ou_user',
+      dueAt: now + 10000, status: 'pending', createdAt: now - 1000, updatedAt: now - 1000 });
+    h.controller.enqueue(message('chat', 'oc_intern', '这个是什么意思', false, now)); await h.controller.flush();
+    expect(h.channel.sent).toHaveLength(0); expect(h.store.getFollowUp('open')?.status).toBe('pending'); await h.controller.stop();
+  });
+
+  it('does not resend a delivered receipt if the new thread lookup fails', async () => {
+    const now = Date.now(); const store = new ProactiveStore(join(await mkdtemp(join(tmpdir(), 'quiet-lookup-')), 'state.json'));
+    const channel = createFakeChannel();
+    const controller = new ProactiveController({ config: ACTIVE_CONFIG, store, channel: channel as never, now: () => now,
+      resolveTaskThread: async () => { throw new Error('lookup unavailable'); },
+      decisionProvider: new FakeDecisionProvider([{ action: 'create', confidence: .99 }]) });
+    await controller.load(); const root = message('root', 'oc_intern', '3 分钟后提醒我开会', false, now);
+    controller.enqueue(root); controller.enqueue(root); await controller.flush();
+    expect(channel.sent).toHaveLength(1); expect(store.snapshot().followUps[0]?.receiptSentAt).toBe(now);
+    await controller.stop();
+  });
+
   it.each([false, true])('routes task updates before new proposals (classifier failure=%s)', async fail => {
     const dir = await mkdtemp(join(tmpdir(), 'proactive-v4-routing-'));
     const store = new ProactiveStore(join(dir, 'state.json'));
@@ -179,7 +233,7 @@ describe('proactive follow-up controller', () => {
     });
     expect(state.decisions.at(-1)?.outcome).toBe('applied');
     expect(harness.channel.sent).toHaveLength(1);
-    expect(harness.channel.sent[0]?.options).toEqual({ replyTo: 'm-create' });
+    expect(harness.channel.sent[0]?.options).toEqual({ replyTo: 'm-create', replyInThread: true });
     await harness.controller.stop();
   });
 

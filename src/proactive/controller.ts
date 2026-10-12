@@ -427,10 +427,9 @@ export class ProactiveController {
       const result = await this.deps.channel.send(
         claimed.chatId,
         { card: reminderCard(claimed, this.deps.config.timeZone, overdue) },
-        claimed.threadId
-          ? { replyTo: claimed.sourceMessageId, replyInThread: true }
-          : undefined,
+        { replyTo: claimed.sourceMessageId, replyInThread: true },
       );
+      await this.rememberReplyThread(claimed, result.messageId);
       const sentAt = this.now();
       const overdueReminderCount =
         (claimed.overdueReminderCount ?? 0) + (overdue ? 1 : 0);
@@ -483,6 +482,13 @@ export class ProactiveController {
     };
     this.deps.store.recordMessage(message);
     const now = this.now();
+
+    // Acknowledgement is context, not permission or a new follow-up. Avoid a
+    // model call entirely for these whole-message, non-action utterances.
+    if (/^(?:(?:好的?|收到|谢谢|感谢|明白了?|知道了|嗯+|哈+|ok|okay|thanks)|[\s，,。.!！👍🙏])+$/iu.test(message.text)) {
+      this.recordDecision(message, 'ignore', 1, 'ignored', undefined, 'quiet-acknowledgement');
+      return;
+    }
 
     if (await this.conditional.handleMessage(message)) {
       this.recordDecision(message, 'clarify', 1, this.canAct() ? 'applied' : 'shadow', undefined, 'conditional-control');
@@ -598,6 +604,15 @@ export class ProactiveController {
       message.chatId,
       message.threadId,
     );
+    // Model uncertainty alone is not a reason to interrupt a conversation.
+    // Keep controls for an existing item; new proposals need grounded intent.
+    if ((result.action === 'create' || result.action === 'clarify') &&
+        (isConversationalNonCommitment(message.text) ||
+          (result.action === 'clarify' && !isCommitmentCandidate(message.text) &&
+            !(pendingFollowUps.length && /完成|取消|延期|推迟|改到|再提醒/.test(message.text))))) {
+      this.recordDecision(message, result.action, result.confidence, 'ignored', undefined, 'quiet-no-action-intent');
+      return;
+    }
     const deterministicTarget = selectTarget(message.text, pendingFollowUps);
     if (
       result.action !== 'postpone' &&
@@ -726,9 +741,9 @@ export class ProactiveController {
       await this.deps.channel.send(
         chatId,
         { text },
-        { replyTo, ...(threadId ? { replyInThread: true } : {}) },
+        { replyTo, replyInThread: true },
       );
-      log.info('proactive', event, { chatId, threaded: Boolean(threadId) });
+      log.info('proactive', event, { chatId, threaded: true });
     } catch (err) {
       log.warn('proactive', `${event}-failed`, { chatId, err: String(err) });
     }
@@ -843,7 +858,7 @@ export class ProactiveController {
       { card: dashboardCard(groups, this.deps.config.timeZone) },
       {
         replyTo: message.messageId,
-        ...(message.threadId ? { replyInThread: true } : {}),
+        replyInThread: true,
       },
     );
   }
@@ -865,7 +880,7 @@ export class ProactiveController {
         },
         {
           replyTo: item.sourceMessageId,
-          ...(item.threadId ? { replyInThread: true } : {}),
+          replyInThread: true,
         },
       );
       const sentAt = this.now();
@@ -874,6 +889,7 @@ export class ProactiveController {
         receiptMessageId: result.messageId,
         updatedAt: sentAt,
       });
+      await this.rememberReplyThread(item, result.messageId);
       await this.deps.store.flush();
     } catch (err) {
       log.warn('proactive', 'proposal-card-failed', { followUpId: item.id, err: String(err) });
@@ -897,7 +913,7 @@ export class ProactiveController {
         { card: followUpRecordedCard(item, this.deps.config.timeZone) },
         {
           replyTo: item.sourceMessageId,
-          ...(item.threadId ? { replyInThread: true } : {}),
+          replyInThread: true,
         },
       );
       const sentAt = this.now();
@@ -906,6 +922,7 @@ export class ProactiveController {
         receiptMessageId: result.messageId,
         updatedAt: sentAt,
       });
+      await this.rememberReplyThread(item, result.messageId);
       await this.deps.store.flush();
       log.info('proactive', 'follow-up-recorded', {
         followUpId,
@@ -917,6 +934,17 @@ export class ProactiveController {
         followUpId,
         err: String(err),
       });
+    }
+  }
+
+  private async rememberReplyThread(item: FollowUp, messageId: string): Promise<void> {
+    if (item.threadId || !messageId || !this.deps.resolveTaskThread) return;
+    try {
+      const threadId = await this.deps.resolveTaskThread(messageId);
+      if (threadId) this.deps.store.updateFollowUp(item.id, { threadId });
+    } catch {
+      // A lookup failure must not resend a successfully delivered card.
+      log.warn('proactive', 'reply-thread-lookup-failed', { followUpId: item.id });
     }
   }
 
@@ -1180,10 +1208,20 @@ function hasExplicitFollowUpIntent(text: string): boolean {
 
 function isCommitmentCandidate(text: string): boolean {
   const normalized = text.replace(/\s+/g, '');
+  if (isConversationalNonCommitment(text)) return false;
   if (/(?:已经|已完成|完成了|搞定了|做完了|不用了|取消了|已取消)/.test(normalized)) {
     return false;
   }
   return hasExplicitFollowUpIntent(text);
+}
+
+function isConversationalNonCommitment(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '');
+  if (/^(?:如果|假如|假设|比如|例如|示例|引用)|(?:不用|无需|不需要|不要|别)(?:再)?(?:提醒|跟进)/.test(normalized)) return true;
+  // Polite reminder requests can be questions; informational questions and
+  // statements of ongoing work are not new commitments.
+  if (/(?:提醒我|通知我|叫我)/.test(normalized)) return false;
+  return /怎么|如何|为什么|是否|正在|[吗呢？?]$/.test(normalized);
 }
 
 function hasExplicitPostponeIntent(text: string): boolean {
@@ -1217,7 +1255,8 @@ function feedbackForUnavailableAction(
     return '我还不能确定你希望创建、延期、完成还是取消哪项跟进，请补充事项和时间。';
   }
   if (action === 'possible-complex-task') {
-    return '这条需求暂未进入主动文档任务流程，尚未开始执行。如需交给执行型智能体，请 @我明确发起任务。';
+    // Unsupported or speculative work is not a request to interrupt the chat.
+    return undefined;
   }
   if ((action === 'complete' || action === 'cancel' || action === 'postpone') && !target) {
     return '我没能确定你指的是哪一项跟进，请带上事项名称再说一次。';

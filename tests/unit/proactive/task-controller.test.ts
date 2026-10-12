@@ -44,6 +44,12 @@ async function harness(options: { active?: boolean; enabled?: boolean; runtime?:
 }
 
 describe('confirmed proactive execution', () => {
+  it.each(['周报模板挺好看', '资料还没整理', '我想知道怎么写周报', '如果需要起草文档怎么办？'])('does not proactively propose work from ordinary discussion: %s', async text => {
+    const h = await harness();
+    await h.controller.offer(message(text), { action: 'possible-complex-task', confidence: .99, taskKind: 'draft' });
+    expect(h.store.snapshot().tasks).toHaveLength(0); expect(h.channel.send).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['资料在这里：验收要求正文', 'material'], ['目前还缺客户名单，卡住了', 'blocker'],
     ['验收时间改到周六下午', 'schedule'], ['目前进展：第一部分已完成', 'progress'],
