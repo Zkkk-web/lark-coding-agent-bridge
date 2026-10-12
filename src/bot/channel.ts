@@ -62,6 +62,7 @@ import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
+import { transportDiagnostic } from './transport-diagnostics';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
@@ -158,7 +159,10 @@ function buildQuietLogger(): {
     },
     warn: (...args: unknown[]) => log.warn('sdk', 'warn', { args: stringifyArgs(args) }),
     info: (...args: unknown[]) => log.info('sdk', 'info', { args: stringifyArgs(args) }),
-    debug: () => {},
+    debug: (...args: unknown[]) => {
+      const diagnostic = transportDiagnostic(args);
+      if (diagnostic) log.info('transport', 'sdk-event', diagnostic);
+    },
     trace: () => {},
   };
 }
@@ -252,6 +256,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         : 'https://open.feishu.cn',
     source: 'lark-channel-bridge',
     logger: buildQuietLogger(),
+    // Opt-in during delivery diagnosis; debug output is reduced to routing metadata above.
+    ...(process.env.LARK_CHANNEL_TRANSPORT_DIAGNOSTICS === '1' ? { loggerLevel: 4 } : {}),
     policy: {
       dmMode: 'open',
       requireMention: false,
@@ -314,7 +320,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             documents: new TaskDocuments(channel.rawClient as DocumentClient, cfg.accounts.app.tenant),
             access: (task) => canUseGroup(controls.profileConfig, controls, task.chatId, task.ownerId),
           }) : undefined,
-          // Reconciliation proves the push stream missed at least one event.
+          // Reconciliation found a message not processed by this observer.
+          // That alone does not prove a dead socket (another receiver may
+          // have consumed it). The supervisor bounds this recovery heuristic.
           // Restart after the recovery cycle has persisted the message; the
           // durable history path prevents the restart itself from losing it.
           onGapDetected: (recovered) => {
@@ -325,7 +333,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             log.warn('proactive', 'ws-gap-detected', { recovered });
             setTimeout(() => {
               if (activeRuns.snapshot().length > 0 || proactiveObserver?.tasks?.hasActiveWork()) return;
-              void controls.restart().catch((err) =>
+              void controls.restart({ reason: 'history-gap' }).catch((err) =>
                 log.fail('proactive', err, { step: 'restart-after-history-gap' }),
               );
             }, 0).unref?.();
